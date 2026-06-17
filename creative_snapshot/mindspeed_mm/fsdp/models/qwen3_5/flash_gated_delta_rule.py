@@ -303,18 +303,17 @@ def flash_gated_delta_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    # def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
-    #     """This function is intended to align with the l2norm implementation in the FLA library."""
-    #     original_dtype = x.dtype
-    #     inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-    #     # Counteract verl's autocast promotion (bf16 -> fp32) by restoring original dtype
-    #     return (x * inv_norm).to(original_dtype)
-    #
-    # if use_qk_l2norm_in_kernel:
-    #     q = l2norm(q, dim=-1, eps=1e-6)
-    #     k = l2norm(k, dim=-1, eps=1e-6)
-    #
-    # use_qk_l2norm_in_kernel = False
+    def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
+        """This function is intended to align with the l2norm implementation in the Triton path."""
+        original_dtype = x.dtype
+        inv_norm = torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
+        # Counteract verl's autocast promotion (bf16 -> fp32) by restoring original dtype.
+        return (x * inv_norm).to(original_dtype)
+
+    if use_qk_l2norm_in_kernel:
+        q = l2norm(q, dim=-1, eps=1e-6)
+        k = l2norm(k, dim=-1, eps=1e-6)
+        use_qk_l2norm_in_kernel = False
 
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q, k, v, g, beta, scale,
