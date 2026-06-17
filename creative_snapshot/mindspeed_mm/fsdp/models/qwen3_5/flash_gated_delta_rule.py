@@ -208,9 +208,15 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         chunk_size: int = 64,
     ):
+        l2norm_mode = os.environ.get("CREATIVE_FLASH_QK_L2NORM_MODE", "outer")
+        q_l2norm_arg = q
+        k_l2norm_arg = k
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
+            if l2norm_mode != "kernel_saved_x":
+                q_l2norm_arg = q
+                k_l2norm_arg = k
         else:
             q_rstd, k_rstd = None, None
 
@@ -221,7 +227,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_size=chunk_size,
         )
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, q_l2norm_arg, k_l2norm_arg, v, g, beta, A, initial_state, cu_seqlens)
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.chunk_size = chunk_size
@@ -231,7 +237,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do: torch.Tensor, dht: torch.Tensor):
-        q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, q_l2norm_arg, k_l2norm_arg, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = flash_chunk_gated_delta_rule_bwd(
             q=q, k=k, v=v, g=g, beta=beta, A=A,
             scale=ctx.scale,
@@ -241,11 +247,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
         )
         if ctx.use_qk_l2norm_in_kernel:
-            dq = l2norm_bwd(q, q_rstd, dq)
-            dk = l2norm_bwd(k, k_rstd, dk)
+            dq = l2norm_bwd(q_l2norm_arg, q_rstd, dq)
+            dk = l2norm_bwd(k_l2norm_arg, k_rstd, dk)
         if initial_state is None:
             dh0 = None
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q_l2norm_arg), dk.to(k_l2norm_arg), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None, None
 
 @torch.compiler.disable
 def flash_gated_delta_rule(
@@ -305,9 +311,9 @@ def flash_gated_delta_rule(
         scale = k.shape[-1] ** -0.5
 
     l2norm_mode = os.environ.get("CREATIVE_FLASH_QK_L2NORM_MODE", "outer")
-    if l2norm_mode not in {"outer", "kernel"}:
+    if l2norm_mode not in {"outer", "kernel", "kernel_saved_x"}:
         raise ValueError(
-            f"CREATIVE_FLASH_QK_L2NORM_MODE must be 'outer' or 'kernel', got {l2norm_mode!r}."
+            f"CREATIVE_FLASH_QK_L2NORM_MODE must be 'outer', 'kernel', or 'kernel_saved_x', got {l2norm_mode!r}."
         )
 
     def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):

@@ -80,6 +80,7 @@ Use this when you need to prove whether the q/k l2norm path is the reason full-w
 
 - `outer`: fixed path. The mixed flash wrapper applies the same Python/autograd l2norm as the Triton baseline before entering the custom autograd Function.
 - `kernel`: old path. The mixed flash wrapper leaves `use_qk_l2norm_in_kernel=True`, so the custom Function uses the `l2norm_fwd/bwd` path provided by the local test shim when external `mindspeed` is absent. Treat this as old-path reproduction, not proof about a real external kernel package.
+- `kernel_saved_x`: experimental contract test. It still uses `l2norm_fwd/bwd`, but saves original q/k in forward and passes original q/k to `l2norm_bwd` in backward.
 
 It also runs `compare_l2norm_precision.py`, which is fully self-contained and does not import `mindspeed`. That script compares explicit l2norm backward formulas against PyTorch autograd for the same fixed/packed shapes.
 
@@ -89,7 +90,7 @@ bash run_l2norm_mode_suite.sh
 
 Read `./l2norm_mode_results/summary.txt`:
 
-- GDN rows show whether `outer` or old `kernel` wrapper mode matches the Triton baseline.
+- GDN rows show whether `outer`, old `kernel`, or `kernel_saved_x` wrapper mode matches the Triton baseline. If `kernel_saved_x` passes while `kernel` fails, the fused norm path can be kept by saving/passing original q/k to `l2norm_bwd`.
 - Standalone l2norm rows show both valid formulas: `original_contract_ok` for `l2norm_bwd(x, rstd, dy)` and `normalized_contract_ok` for `l2norm_bwd(y, rstd, dy)`.
 - `old_flash_if_original_ok=False` means the old flash call would fail if its `l2norm_bwd` implementation expects original `x`, because the old wrapper saves and passes normalized q/k.
 - `old_flash_if_normalized_ok=True` means the old flash call is mathematically fine if its `l2norm_bwd` implementation is intentionally defined to accept normalized output `y`.

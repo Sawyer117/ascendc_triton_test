@@ -80,6 +80,7 @@ run_gdn_pair() {
   shift
   run_gdn "${name}" outer "$@"
   run_gdn "${name}" kernel "$@"
+  run_gdn "${name}" kernel_saved_x "$@"
 }
 
 echo "l2norm mode suite"

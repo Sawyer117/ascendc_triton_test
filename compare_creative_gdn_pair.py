@@ -58,12 +58,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mixed-l2norm-mode",
-        choices=["outer", "kernel"],
+        choices=["outer", "kernel", "kernel_saved_x"],
         default=os.environ.get("CREATIVE_FLASH_QK_L2NORM_MODE", "outer"),
         help=(
             "How the AscendC-mixed flash wrapper applies q/k l2norm when --no-qk-l2norm is not set. "
             "outer uses the fixed Python/autograd norm before the custom Function; "
-            "kernel preserves the old internal l2norm_fwd/bwd path."
+            "kernel preserves the old internal l2norm_fwd/bwd path; kernel_saved_x uses l2norm_fwd/bwd but passes original q/k to l2norm_bwd."
         ),
     )
     parser.add_argument("--output-json", type=str)
