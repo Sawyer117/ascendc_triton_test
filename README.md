@@ -1,156 +1,142 @@
-# AscendC vs Triton GDN Precision Test
+# AscendC GDN Precision Test, No MindSpeed-MM
 
-This repository contains a standalone precision comparison script for the
-Qwen3.5 Gated DeltaNet (GDN) operator paths in MindSpeed-MM:
+This repo contains a standalone precision script for the FLA-npu Qwen3.5 GDN path.
+It does **not** import `mindspeed_mm`.
 
-- Triton path: `mindspeed_mm.fsdp.models.qwen3_5.chunk_gated_delta_rule`
-- AscendC path: `mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule`
+Current comparison:
 
-The script runs both implementations on identical random inputs and compares
-the forward output plus gradients of `q`, `k`, `v`, `beta`, and `g`.
+- AscendC path: `flash-linear-attention-npu/examples/flash_gated_delta_rule.py`
+- Baseline: pure PyTorch reference embedded in `compare_gdn_precision.py`
+- Checked tensors: forward output plus gradients of `q`, `k`, `v`, `beta`, and `g`
+- Supported cases: fixed length and packed varlen via `cu_seqlens`
 
-## 1. Expected Environment
+The AscendC wrapper still imports helper kernels from the local FLA-npu repo, so you still need the FLA-npu Python dependencies such as `triton-ascend`. You do not need MindSpeed-MM.
 
-Run this on an Ascend NPU host. The script is not useful on CPU-only machines.
+## Expected Environment
 
-Recommended baseline from the MindSpeed-MM Qwen3.5 notes:
+Run on the Ascend server with the same Python environment that has working `torch`, `torch_npu`, and `fla_npu`.
 
-- Python 3.10
-- CANN 8.5.x or newer
-- PyTorch and torch_npu matched to your PTA release
-- MindSpeed-MM installed or available in `PYTHONPATH`
-- Triton-on-NPU support for the original GDN path
-- FLA-npu custom operators for the AscendC GDN path
+Known-good family from the FLA-npu notes:
 
-The AscendC GDN adaptation notes in MindSpeed-MM mention a strict PTA
-requirement and recommend the `26.1.0.beta` PyTorch Adapter for this path.
+- CANN 8.5+ or 9.x
+- Ascend PyTorch release `v26.1.0-beta.1`
+- `torch==2.7.1`
+- `torch_npu==2.7.1.post5`, matching your Python ABI and CPU arch
+- `triton-ascend`, `pybind11`, and `flash-linear-attention-npu/requirements.txt`
 
-## 2. Install MindSpeed-MM
+If `torch_custom/fla_npu/build.sh` reports `No module named torchnpugen`, your `torch_npu` wheel is missing or from the wrong release family. The matching `torch_npu` wheel should provide `torchnpugen`.
 
-Clone and install MindSpeed-MM on the server. Example:
+## Install Or Refresh FLA-npu Ops
 
-```bash
-git clone https://gitcode.com/Ascend/MindSpeed-MM.git
-cd MindSpeed-MM
-
-# Adjust the MindSpeed commit ID to the one required by your branch.
-bash scripts/install.sh --msid eb10b92
-bash examples/qwen3_5/install_extensions.sh
-```
-
-If you already have a working MindSpeed-MM environment for Qwen3.5, keep using
-that environment. The comparison script only needs to import the installed
-`mindspeed_mm` package.
-
-## 3. Install AscendC GDN Custom Ops
-
-The AscendC path depends on FLA-npu custom operators. Build them from the FLA
-NPU source repository on the target machine:
+If you already built and installed FLA-npu successfully, you do not need to repeat this section. Keep the exact CANN path from your machine.
 
 ```bash
-git clone https://github.com/flashserve/flash-linear-attention-npu.git
-cd flash-linear-attention-npu
+cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test/flash-linear-attention-npu
+source /home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/set_env.sh
+pip install -r requirements.txt
+pip install pybind11
 
-# Change this path to your actual CANN toolkit path.
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-
-# Select the correct SoC for your machine:
-#   ascend910b, ascend910_93, or ascend950
+# Pick the SoC that matches the server: ascend910b, ascend910_93, or ascend950.
 bash build.sh --soc=ascend910_93 --pkg --vendor_name=fla_npu
-
-# Install the generated custom-op run package.
 ./build_out/fla-npu-*.run
 
-# Build and install the torch adapter wheel.
 cd torch_custom/fla_npu
 bash build.sh
 ```
 
-Optional single-op smoke test from the FLA-npu repo:
+After installing the `.run` package, export the custom op API library path before running tests:
 
 ```bash
-cd torch_custom/fla_npu/test
-bash test.sh
+export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 ```
 
-## 4. Verify Imports
+Do not run the precision script from inside `flash-linear-attention-npu/torch_custom/fla_npu`; that source directory can shadow the installed `fla_npu` wheel.
 
-From the same Python environment:
+## Verify Runtime
+
+From the test repo root:
 
 ```bash
+cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test
+export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 python - <<'PY'
 import torch
 import torch_npu
 import fla_npu
 
-print("torch:", torch.__version__)
-print("npu available:", torch.npu.is_available())
-print("fla_npu imported")
+print("torch", torch.__version__)
+print("torch_npu", torch_npu.__version__)
+print("npu", torch.npu.is_available())
+
+ops = [
+    "npu_recompute_w_u_fwd",
+    "npu_chunk_gated_delta_rule_fwd_h",
+    "npu_chunk_fwd_o",
+    "npu_chunk_bwd_dv_local",
+    "npu_chunk_gated_delta_rule_bwd_dhu",
+    "npu_chunk_bwd_dqkwg",
+    "npu_prepare_wy_repr_bwd_da",
+    "npu_prepare_wy_repr_bwd_full",
+]
+for op in ops:
+    print(op, hasattr(torch.ops.npu, op))
 PY
 ```
 
-If `fla_npu` imports but `torch.ops.npu.npu_chunk_*` is missing at runtime,
-recheck that the custom-op run package and torch adapter wheel were installed
-after sourcing the correct CANN environment.
+All ops should print `True`.
 
-## 5. Run Precision Comparison
+## Run Varlen Precision
 
-Clone this repo on the server:
+Pull the current script first. If you see `No module named mindspeed_mm`, you are still running the old version.
 
 ```bash
-git clone https://github.com/Sawyer117/ascendc_triton_test.git
-cd ascendc_triton_test
+cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test
+git pull
+export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
+python compare_gdn_precision.py \
+  --case varlen \
+  --fla-repo ./flash-linear-attention-npu \
+  --device 0 \
+  --output-json /tmp/gdn_varlen.json
 ```
 
-If MindSpeed-MM is installed editable, this may be enough:
+If the FLA-npu repo is elsewhere, point `--fla-repo` to that checkout:
 
 ```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-python compare_gdn_precision.py --case small
+python compare_gdn_precision.py --case varlen --fla-repo /path/to/flash-linear-attention-npu --device 0
 ```
 
-If MindSpeed-MM is only available as source, set `PYTHONPATH`:
+Run the quick fixed-length smoke case:
 
 ```bash
-export MINDSPEED_MM=/path/to/MindSpeed-MM
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-PYTHONPATH=${MINDSPEED_MM}:${PYTHONPATH} \
-  python compare_gdn_precision.py --case all --output-json /tmp/gdn_precision.json
+python compare_gdn_precision.py --case small --fla-repo ./flash-linear-attention-npu --device 0
 ```
 
-Run a custom shape:
+Run all bundled cases:
 
 ```bash
-PYTHONPATH=${MINDSPEED_MM}:${PYTHONPATH} \
-  python compare_gdn_precision.py \
-  --batch 1 \
-  --seq-len 4608 \
-  --heads 32 \
-  --key-dim 128 \
-  --value-dim 128 \
-  --chunk-size 64 \
-  --atol 1e-2 \
-  --rtol 1e-2
+python compare_gdn_precision.py --case all --fla-repo ./flash-linear-attention-npu --device 0 --output-json /tmp/gdn_all.json
 ```
 
-Run a packed variable-length case:
+Run a custom packed varlen shape:
 
 ```bash
-PYTHONPATH=${MINDSPEED_MM}:${PYTHONPATH} \
-  python compare_gdn_precision.py \
-  --batch 1 \
+python compare_gdn_precision.py \
+  --case varlen \
+  --fla-repo ./flash-linear-attention-npu \
   --cu-seqlens 0,112,209,240,281,489,523,566,689,721,785,837,985,1071,1121 \
   --heads 8 \
   --key-dim 128 \
   --value-dim 128 \
-  --chunk-size 64
+  --chunk-size 64 \
+  --device 0
 ```
 
-## 6. Output Interpretation
+## Output
 
 The script prints JSON. Each compared tensor includes:
 
-- `allclose`: result under the selected `--atol` and `--rtol`
+- `allclose`: result under `--atol` and `--rtol`
 - `max_abs`: maximum absolute difference
 - `mean_abs`: mean absolute difference
 - `rms`: root mean square difference
@@ -159,19 +145,15 @@ The script prints JSON. Each compared tensor includes:
 
 Exit codes:
 
-- `0`: all compared tensors passed `allclose`
-- `1`: script ran, but at least one tensor failed tolerance
-- `2`: environment or runtime error, such as missing `torch_npu`, `fla_npu`, NPU, or MindSpeed-MM
+- `0`: all compared tensors passed
+- `1`: the run completed but at least one tensor failed tolerance
+- `2`: environment/runtime error
 
-The default tolerance is `atol=1e-2`, `rtol=1e-2`, matching the existing
-MindSpeed-MM Qwen3.5 GDN unit-test tolerance style.
+Default tolerance is `atol=1e-2`, `rtol=1e-2`.
 
-## 7. Common Problems
+## Common Errors
 
-- `No module named mindspeed_mm`: install MindSpeed-MM or set `PYTHONPATH` to
-  the MindSpeed-MM source root.
-- `torch_npu is required`: activate the Ascend PyTorch environment.
-- `fla_npu is required`: build and install FLA-npu custom ops first.
-- `NPU is not available`: run on an Ascend host and source the CANN environment.
-- `torch.ops.npu.npu_chunk_*` missing: reinstall the FLA-npu run package and
-  torch adapter wheel under the same CANN/PTA environment.
+- `No module named mindspeed_mm`: run `git pull`; the current script has no MindSpeed-MM import.
+- `No module named triton`: install `triton-ascend`; avoid mixing it with community `triton` for older Ascend releases.
+- `fla_npu failed to import`: install `torch_custom/fla_npu`, export `LD_LIBRARY_PATH`, and run outside `torch_custom/fla_npu`.
+- Missing `torch.ops.npu.*`: reinstall the FLA-npu `.run` package and rebuild the `fla_npu` wheel in the same Python environment.
