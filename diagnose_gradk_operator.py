@@ -36,11 +36,11 @@ import compare_gdn_precision as cmp
 # Tuple layout: replace_dhu, replace_dqkwg, replace_wy.
 VARIANTS: dict[str, tuple[bool, bool, bool]] = {
     "ascendc": (False, False, False),
-    "triton_dhu": (True, False, False),
     "triton_dqkwg": (False, True, False),
     "triton_wy": (False, False, True),
-    "triton_dhu_dqkwg": (True, True, False),
     "triton_both": (False, True, True),
+    "triton_dhu": (True, False, False),
+    "triton_dhu_dqkwg": (True, True, False),
     "triton_all": (True, True, True),
 }
 
@@ -706,33 +706,36 @@ def failed_tensors(comparisons: dict[str, Any]) -> list[str]:
     return [name for name, stats in comparisons.items() if not stats["allclose"]]
 
 
+def compact_error(exc: Exception, max_lines: int = 12) -> str:
+    lines = str(exc).strip().splitlines()
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    keep_head = max(1, max_lines // 3)
+    keep_tail = max_lines - keep_head - 1
+    return "\n".join([*lines[:keep_head], "...", *lines[-keep_tail:]])
+
+
+def grad_k_allclose(variant_results: dict[str, Any], name: str) -> bool:
+    result = variant_results.get(name)
+    if not result or "comparisons" not in result:
+        return False
+    return bool(result["comparisons"].get("grad_k", {}).get("allclose", False))
+
+
 def infer_culprit(variant_results: dict[str, Any]) -> str:
     present = set(variant_results)
     if "ascendc" not in present:
         return "Run the ascendc variant to infer a culprit."
-    if variant_results["ascendc"]["comparisons"]["grad_k"]["allclose"]:
+    if "comparisons" not in variant_results["ascendc"]:
+        return "ascendc variant did not complete; cannot infer a culprit."
+    if grad_k_allclose(variant_results, "ascendc"):
         return "ascendc grad_k already passes; no failing branch in this case."
 
-    dhu_ok = (
-        "triton_dhu" in present
-        and variant_results["triton_dhu"]["comparisons"]["grad_k"]["allclose"]
-    )
-    dqkwg_ok = (
-        "triton_dqkwg" in present
-        and variant_results["triton_dqkwg"]["comparisons"]["grad_k"]["allclose"]
-    )
-    wy_ok = (
-        "triton_wy" in present
-        and variant_results["triton_wy"]["comparisons"]["grad_k"]["allclose"]
-    )
-    late_both_ok = (
-        "triton_both" in present
-        and variant_results["triton_both"]["comparisons"]["grad_k"]["allclose"]
-    )
-    all_ok = (
-        "triton_all" in present
-        and variant_results["triton_all"]["comparisons"]["grad_k"]["allclose"]
-    )
+    dhu_ok = grad_k_allclose(variant_results, "triton_dhu")
+    dqkwg_ok = grad_k_allclose(variant_results, "triton_dqkwg")
+    wy_ok = grad_k_allclose(variant_results, "triton_wy")
+    late_both_ok = grad_k_allclose(variant_results, "triton_both")
+    all_ok = grad_k_allclose(variant_results, "triton_all")
     if dhu_ok:
         return "Most likely culprit: npu_chunk_gated_delta_rule_bwd_dhu."
     if dqkwg_ok and not wy_ok:
@@ -795,19 +798,33 @@ def main() -> int:
         variant_results = {}
         for name in names:
             print(f"==> {name}", flush=True)
-            raw = run_variant(
-                name,
-                case,
-                args,
-                flash_module,
-                triton_dhu,
-                triton_dqkwg,
-                triton_wy,
-                inputs,
-                do,
-            )
-            comparisons = compare_outputs(raw, reference, inputs[-1], args)
-            tails = tail_reports(raw, reference, case, inputs[-1], args)
+            try:
+                raw = run_variant(
+                    name,
+                    case,
+                    args,
+                    flash_module,
+                    triton_dhu,
+                    triton_dqkwg,
+                    triton_wy,
+                    inputs,
+                    do,
+                )
+                comparisons = compare_outputs(raw, reference, inputs[-1], args)
+                tails = tail_reports(raw, reference, case, inputs[-1], args)
+            except Exception as exc:  # pylint: disable=broad-except
+                error_text = compact_error(exc)
+                variant_results[name] = {
+                    "replace_dhu": VARIANTS[name][0],
+                    "replace_dqkwg": VARIANTS[name][1],
+                    "replace_wy": VARIANTS[name][2],
+                    "passed": False,
+                    "failed_tensors": ["__variant_error__"],
+                    "error": error_text,
+                }
+                print("    ERROR", error_text.replace("\n", " | "), flush=True)
+                continue
+
             raw_results[name] = raw
             variant_results[name] = {
                 "replace_dhu": VARIANTS[name][0],
@@ -859,6 +876,12 @@ def main() -> int:
 
         print("\nsummary")
         for name, result in variant_results.items():
+            if "error" in result:
+                print(
+                    f"{name:14s} passed=False error=True "
+                    f"failed={','.join(result['failed_tensors'])}"
+                )
+                continue
             gk = result["comparisons"]["grad_k"]
             print(
                 f"{name:14s} passed={result['passed']} "
