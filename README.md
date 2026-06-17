@@ -27,13 +27,25 @@ export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp
 bash run_creative_pair_suite.sh
 ```
 
-By default this uses `./creative_snapshot`, so no separate creative checkout is required. To validate a newer creative branch instead of the vendored snapshot, override it explicitly:
+By default this uses `./creative_snapshot`, disables q/k l2norm (`QK_L2NORM=0`), and runs only the safe core-GDN cases. This keeps the first comparison focused on the GDN operator chain instead of l2norm shim differences or known AICore-crashing multi-segment unaligned cases.
+
+To validate a newer creative branch instead of the vendored snapshot, override it explicitly:
 
 ```bash
 CREATIVE_REPO=/path/to/qwen3.5_omni_creative bash run_creative_pair_suite.sh
 ```
 
-The suite writes to `./creative_pair_results/` and compares `output`, `grad_q`, `grad_k`, `grad_v`, `grad_beta`, and `grad_g`. It includes fixed-length controls, aligned varlen controls, and non-64-aligned packed-tail cases such as `cu_seqlens=0,1121`.
+The suite writes to `./creative_pair_results/` and compares `output`, `grad_q`, `grad_k`, `grad_v`, `grad_beta`, and `grad_g`. The default cases are fixed-length controls, aligned varlen controls, and the single-segment non-64-aligned packed-tail case `cu_seqlens=0,1121`.
+
+Optional modes:
+
+```bash
+# Include q/k l2norm. This is a full-wrapper check, not the first-pass GDN core check.
+QK_L2NORM=1 bash run_creative_pair_suite.sh
+
+# Run multi-segment unaligned cases that can currently trigger an AICore exception.
+RUN_UNSAFE=1 bash run_creative_pair_suite.sh
+```
 
 Run one focused case:
 
@@ -46,10 +58,11 @@ python compare_creative_gdn_pair.py \
   --value-dim 128 \
   --chunk-size 64 \
   --device 0 \
+  --no-qk-l2norm \
   --output-json ./creative_pair_results/varlen_single_1121.json
 ```
 
-The focused command also defaults to `./creative_snapshot`. Pass `--creative-repo /path/to/qwen3.5_omni_creative` only when you intentionally want to test an external checkout.
+The focused command also defaults to `./creative_snapshot`. Pass `--creative-repo /path/to/qwen3.5_omni_creative` only when you intentionally want to test an external checkout. Omit `--no-qk-l2norm` only when you explicitly want the full q/k l2norm wrapper path.
 
 If the creative mixed path imports `mindspeed.lite.ops.triton.*` but that external `mindspeed` package is absent, the script shims those helper imports to the snapshot's local `mindspeed_mm/fsdp/models/qwen3_5/triton/*` modules and records `mindspeed_triton_shim_used=true` in JSON. Use `--no-mindspeed-triton-shim` to require the exact external import path.
 
