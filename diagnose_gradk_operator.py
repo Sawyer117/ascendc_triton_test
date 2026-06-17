@@ -33,17 +33,19 @@ from typing import Any
 import compare_gdn_precision as cmp
 
 
-# Tuple layout: replace_dhu, replace_dqkwg, replace_wy.
-VARIANTS: dict[str, tuple[bool, bool, bool]] = {
-    "ascendc": (False, False, False),
-    "manual_ascendc": (False, False, False),
-    "triton_full": (False, False, False),
-    "triton_dqkwg": (False, True, False),
-    "triton_wy": (False, False, True),
-    "triton_both": (False, True, True),
-    "triton_dhu": (True, False, False),
-    "triton_dhu_dqkwg": (True, True, False),
-    "triton_all": (True, True, True),
+# Tuple layout: replace_dv_local, replace_dhu, replace_dqkwg, replace_wy.
+VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
+    "ascendc": (False, False, False, False),
+    "manual_ascendc": (False, False, False, False),
+    "triton_full": (False, False, False, False),
+    "triton_dvlocal": (True, False, False, False),
+    "triton_dqkwg": (False, False, True, False),
+    "triton_wy": (False, False, False, True),
+    "triton_both": (False, False, True, True),
+    "triton_dhu": (False, True, False, False),
+    "triton_dvlocal_dhu": (True, True, False, False),
+    "triton_dhu_dqkwg": (False, True, True, False),
+    "triton_all": (True, True, True, True),
 }
 
 
@@ -74,6 +76,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
     parser.add_argument("--no-qk-l2norm", action="store_true")
+    parser.add_argument(
+        "--manual-l2norm-bwd-input",
+        choices=["normalized", "original"],
+        default=os.environ.get("MANUAL_L2NORM_BWD_INPUT", "normalized"),
+        help=(
+            "Input passed to l2norm_bwd in manual/hybrid chains. "
+            "normalized preserves old wrapper parity; original tests the saved-input contract."
+        ),
+    )
     parser.add_argument("--output-json", type=str)
     parser.add_argument(
         "--tail-topk",
@@ -129,6 +140,7 @@ def load_local_triton():
     chunk_o = importlib.import_module("local_triton.chunk_o")
     wy_fast = importlib.import_module("local_triton.wy_fast")
     return (
+        chunk_o.chunk_bwd_dv_local,
         chunk_delta_h.chunk_gated_delta_rule_bwd_dhu,
         chunk_o.chunk_bwd_dqkwg,
         wy_fast.prepare_wy_repr_bwd,
@@ -209,6 +221,7 @@ def run_reference(case: cmp.Case, args: argparse.Namespace, inputs: tuple[Any, .
 
 def run_backward_components(
     flash_module,
+    triton_dvlocal,
     triton_dhu,
     triton_dqkwg,
     triton_wy,
@@ -226,6 +239,7 @@ def run_backward_components(
     chunk_indices,
     chunk_indices_list,
     chunk_size: int,
+    replace_dv_local: bool,
     replace_dhu: bool,
     replace_dqkwg: bool,
     replace_wy: bool,
@@ -264,18 +278,30 @@ def run_backward_components(
         transpose_state_layout=False,
     )
 
-    dv_local = torch.ops.npu.npu_chunk_bwd_dv_local(
-        q,
-        k,
-        do_hf,
-        g_hf,
-        scale,
-        chunk_size,
-        g_gamma=None,
-        A=A,
-        cu_seqlens=cu_seqlens_list,
-        chunk_indices=chunk_idx_list,
-    )
+    if replace_dv_local:
+        dv_local_tf = triton_dvlocal(
+            q=hf_to_tf(q),
+            k=hf_to_tf(k),
+            do=do,
+            g=g,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+        )
+        dv_local = tf_to_hf(dv_local_tf)
+    else:
+        dv_local = torch.ops.npu.npu_chunk_bwd_dv_local(
+            q,
+            k,
+            do_hf,
+            g_hf,
+            scale,
+            chunk_size,
+            g_gamma=None,
+            A=A,
+            cu_seqlens=cu_seqlens_list,
+            chunk_indices=chunk_idx_list,
+        )
 
     if replace_dhu:
         dh_tf, _, dv_mid_tf = triton_dhu(
@@ -416,6 +442,9 @@ def run_backward_components(
         "dg": dg,
         "dk_from_dqkwg": dk_from_dqkwg,
         "dk_from_wy": dk_from_wy,
+        "dv_local": dv_local,
+        "dv_mid": dv_mid,
+        "dh": dh,
     }
 
 
@@ -483,6 +512,7 @@ def run_variant(
     case: cmp.Case,
     args: argparse.Namespace,
     flash_module,
+    triton_dvlocal,
     triton_dhu,
     triton_dqkwg,
     triton_wy,
@@ -491,7 +521,7 @@ def run_variant(
 ):
     torch = cmp.torch
     q, k, v, beta, g, cu = inputs
-    replace_dhu, replace_dqkwg, replace_wy = VARIANTS[name]
+    replace_dv_local, replace_dhu, replace_dqkwg, replace_wy = VARIANTS[name]
     use_qk_l2norm = not args.no_qk_l2norm
 
     q_hf = q.transpose(1, 2).contiguous()
@@ -527,6 +557,7 @@ def run_variant(
 
     parts = run_backward_components(
         flash_module,
+        triton_dvlocal,
         triton_dhu,
         triton_dqkwg,
         triton_wy,
@@ -543,6 +574,7 @@ def run_variant(
         chunk_indices=chunk_indices,
         chunk_indices_list=chunk_indices_list,
         chunk_size=case.chunk_size,
+        replace_dv_local=replace_dv_local,
         replace_dhu=replace_dhu,
         replace_dqkwg=replace_dqkwg,
         replace_wy=replace_wy,
@@ -551,8 +583,10 @@ def run_variant(
     dq = parts["dq"]
     dk = parts["dk"]
     if use_qk_l2norm:
-        dq = flash_module.l2norm_bwd(q_work, q_rstd, dq)
-        dk = flash_module.l2norm_bwd(k_work, k_rstd, dk)
+        q_l2norm_arg = q_hf if args.manual_l2norm_bwd_input == "original" else q_work
+        k_l2norm_arg = k_hf if args.manual_l2norm_bwd_input == "original" else k_work
+        dq = flash_module.l2norm_bwd(q_l2norm_arg, q_rstd, dq)
+        dk = flash_module.l2norm_bwd(k_l2norm_arg, k_rstd, dk)
 
     torch.npu.synchronize()
     return {
@@ -565,6 +599,9 @@ def run_variant(
         "components": {
             "dk_from_dqkwg": hf_to_tf(parts["dk_from_dqkwg"]),
             "dk_from_wy": hf_to_tf(parts["dk_from_wy"]),
+            "dv_local": hf_to_tf(parts["dv_local"]),
+            "dv_mid": hf_to_tf(parts["dv_mid"]),
+            "dh": parts["dh"].transpose(1, 2).contiguous(),
         },
     }
 
@@ -590,10 +627,16 @@ def component_delta(left: dict[str, Any], right: dict[str, Any], cu, args: argpa
     device = left["components"]["dk_from_dqkwg"].device
     valid_mask = cmp.varlen_valid_mask(cu, device) if cu is not None else None
     out = {}
-    for name in ("dk_from_dqkwg", "dk_from_wy"):
+    for name in ("dk_from_dqkwg", "dk_from_wy", "dv_local", "dv_mid"):
         lhs = maybe_unflatten(cu, left["components"][name])
         rhs = maybe_unflatten(cu, right["components"][name])
         out[name] = cmp.tensor_stats(lhs, rhs, args.atol, args.rtol, valid_mask)
+    out["dh"] = cmp.tensor_stats(
+        left["components"]["dh"],
+        right["components"]["dh"],
+        args.atol,
+        args.rtol,
+    )
     return out
 
 
@@ -821,13 +864,19 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
     else:
         full_prefix = ""
 
+    dvlocal_ok = grad_k_allclose(variant_results, "triton_dvlocal")
     dhu_ok = grad_k_allclose(variant_results, "triton_dhu")
+    dvlocal_dhu_ok = grad_k_allclose(variant_results, "triton_dvlocal_dhu")
     dqkwg_ok = grad_k_allclose(variant_results, "triton_dqkwg")
     wy_ok = grad_k_allclose(variant_results, "triton_wy")
     late_both_ok = grad_k_allclose(variant_results, "triton_both")
     all_ok = grad_k_allclose(variant_results, "triton_all")
+    if dvlocal_ok:
+        return full_prefix + "Most likely culprit: npu_chunk_bwd_dv_local."
     if dhu_ok:
         return full_prefix + "Most likely culprit: npu_chunk_gated_delta_rule_bwd_dhu."
+    if dvlocal_dhu_ok:
+        return full_prefix + "Replacing dv_local+dhu fixes grad_k; inspect both upstream backward ops."
     if dqkwg_ok and not wy_ok:
         return full_prefix + "Most likely culprit: npu_chunk_bwd_dqkwg."
     if wy_ok and not dqkwg_ok:
@@ -837,7 +886,7 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
     if late_both_ok:
         return full_prefix + "Only replacing dqkwg+WY makes grad_k pass; error is split across late branches."
     if all_ok:
-        return full_prefix + "Only replacing dhu+dqkwg+WY makes grad_k pass; dhu and a later branch both contribute or Triton layouts differ."
+        return full_prefix + "Only replacing dv_local+dhu+dqkwg+WY makes grad_k pass; upstream and late branches both contribute or Triton layouts differ."
     return full_prefix + "No validated Triton replacement fixed grad_k; check controls before blaming a single op."
 
 
@@ -868,7 +917,7 @@ def main() -> int:
             torch.npu.set_compile_mode(jit_compile=False)
 
         full_triton_gdn = load_full_triton_gdn()
-        triton_dhu, triton_dqkwg, triton_wy = load_local_triton()
+        triton_dvlocal, triton_dhu, triton_dqkwg, triton_wy = load_local_triton()
         case = cmp.override_case(cmp.CASES[args.case], args)
         dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
         inputs = cmp.make_inputs(case, device, dtype, args.seed)
@@ -887,7 +936,7 @@ def main() -> int:
         if args.variant == "all":
             names = [
                 name for name, flags in VARIANTS.items()
-                if args.include_dhu_hybrid or not flags[0]
+                if args.include_dhu_hybrid or not flags[1]
             ]
         else:
             names = [args.variant]
@@ -906,6 +955,7 @@ def main() -> int:
                         case,
                         args,
                         flash_module,
+                        triton_dvlocal,
                         triton_dhu,
                         triton_dqkwg,
                         triton_wy,
@@ -918,9 +968,10 @@ def main() -> int:
                 error_text = compact_error(exc)
                 variant_results[name] = {
                     "kind": "wrapper_ascendc" if name == "ascendc" else ("full_triton" if name == "triton_full" else "hybrid_or_manual_ascendc"),
-                    "replace_dhu": VARIANTS[name][0],
-                    "replace_dqkwg": VARIANTS[name][1],
-                    "replace_wy": VARIANTS[name][2],
+                    "replace_dv_local": VARIANTS[name][0],
+                    "replace_dhu": VARIANTS[name][1],
+                    "replace_dqkwg": VARIANTS[name][2],
+                    "replace_wy": VARIANTS[name][3],
                     "passed": False,
                     "failed_tensors": ["__variant_error__"],
                     "error": error_text,
@@ -931,9 +982,10 @@ def main() -> int:
             raw_results[name] = raw
             variant_results[name] = {
                 "kind": "wrapper_ascendc" if name == "ascendc" else ("full_triton" if name == "triton_full" else "hybrid_or_manual_ascendc"),
-                "replace_dhu": VARIANTS[name][0],
-                "replace_dqkwg": VARIANTS[name][1],
-                "replace_wy": VARIANTS[name][2],
+                "replace_dv_local": VARIANTS[name][0],
+                "replace_dhu": VARIANTS[name][1],
+                "replace_dqkwg": VARIANTS[name][2],
+                "replace_wy": VARIANTS[name][3],
                 "passed": all(stats["allclose"] for stats in comparisons.values()),
                 "failed_tensors": failed_tensors(comparisons),
                 "comparisons": comparisons,
@@ -957,10 +1009,19 @@ def main() -> int:
             print_tail_top_errors(only_name, variant_results[only_name].get("tail_reports", {}))
 
         component_deltas = {}
-        if "manual_ascendc" in raw_results and "triton_both" in raw_results:
-            component_deltas["manual_ascendc_vs_triton_both"] = component_delta(
-                raw_results["manual_ascendc"], raw_results["triton_both"], inputs[-1], args
-            )
+        if "manual_ascendc" in raw_results:
+            for right_name in (
+                "triton_dvlocal",
+                "triton_dqkwg",
+                "triton_wy",
+                "triton_both",
+                "triton_dvlocal_dhu",
+                "triton_all",
+            ):
+                if right_name in raw_results:
+                    component_deltas[f"manual_ascendc_vs_{right_name}"] = component_delta(
+                        raw_results["manual_ascendc"], raw_results[right_name], inputs[-1], args
+                    )
 
         conclusion = infer_culprit(variant_results)
         payload = {
@@ -996,13 +1057,14 @@ def main() -> int:
                 f"failed={','.join(result['failed_tensors']) or '-'}"
             )
         if component_deltas:
-            print("\ncomponent deltas: manual_ascendc vs triton_both")
-            first_delta = next(iter(component_deltas.values()))
-            for name, stats in first_delta.items():
-                print(
-                    f"{name:14s} max_abs={stats['max_abs']:.6g} "
-                    f"rms={stats['rms']:.6g} mismatch={stats['mismatch_ratio']:.6g}"
-                )
+            print("\ncomponent deltas")
+            for delta_name, delta in component_deltas.items():
+                print(delta_name)
+                for name, stats in delta.items():
+                    print(
+                        f"  {name:14s} max_abs={stats['max_abs']:.6g} "
+                        f"rms={stats['rms']:.6g} mismatch={stats['mismatch_ratio']:.6g}"
+                    )
         print(f"\nconclusion: {conclusion}")
 
         text = json.dumps(payload, indent=2, sort_keys=True)

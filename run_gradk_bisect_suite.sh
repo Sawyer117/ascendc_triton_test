@@ -8,6 +8,7 @@ DTYPE=${DTYPE:-bf16}
 OUT_DIR=${OUT_DIR:-./precision_results/gradk_bisect}
 MODE=${MODE:-controls_and_target}
 VARIANT=${VARIANT:-all}
+MANUAL_L2NORM_BWD_INPUT=${MANUAL_L2NORM_BWD_INPUT:-normalized}
 
 mkdir -p "${OUT_DIR}"
 
@@ -19,6 +20,7 @@ echo "  dtype:    ${DTYPE}"
 echo "  out_dir:  ${OUT_DIR}"
 echo "  mode:     ${MODE}"
 echo "  variant:  ${VARIANT}"
+echo "  manual_l2norm_bwd_input: ${MANUAL_L2NORM_BWD_INPUT}"
 echo
 
 run_case() {
@@ -32,6 +34,7 @@ run_case() {
     --device "${DEVICE}"
     --dtype "${DTYPE}"
     --variant "${VARIANT}"
+    --manual-l2norm-bwd-input "${MANUAL_L2NORM_BWD_INPUT}"
     --tail-topk 8
     --output-json "${json}"
     "$@"
@@ -103,7 +106,7 @@ for name, path in case_files.items():
         cases[name] = json.loads(path.read_text())
 
 if variant_env == "all":
-    variants = ["ascendc", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both"]
+    variants = ["ascendc", "manual_ascendc", "triton_full", "triton_dvlocal", "triton_dqkwg", "triton_wy", "triton_both"]
 else:
     variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]

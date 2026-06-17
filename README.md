@@ -317,21 +317,23 @@ The diagnostic runs these variants:
 - `ascendc`: real FLA-npu `flash_gated_delta_rule(...).backward()` wrapper path. This must reproduce `compare_gdn_precision.py`.
 - `manual_ascendc`: hand-reconstructed internal AscendC op chain used only for debugging. It is not a deployable replacement.
 - `triton_full`: complete local Triton GDN forward/backward. This is the Triton baseline; it does not mix AscendC intermediates.
+- `triton_dvlocal`: only `npu_chunk_bwd_dv_local` is replaced by the local Triton kernel. This checks whether the bad tail signal starts before `bwd_dhu`.
 - `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
 - `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
-- `triton_both`: replace `dqkwg` and WY backward, but keep `bwd_dhu` as AscendC.
+- `triton_both`: replace `dqkwg` and WY backward, but keep `bwd_dv_local` and `bwd_dhu` as AscendC.
 - `triton_dhu`: experimental hybrid that replaces only `npu_chunk_gated_delta_rule_bwd_dhu`; it is not included in default `--variant all` because it can hit Triton-Ascend UB-limit compilation failures when isolated from the full Triton graph.
-- `triton_dhu_dqkwg` / `triton_all`: experimental hybrids involving `bwd_dhu`; run them only with `--include-dhu-hybrid` or explicit `--variant`.
+- `triton_dvlocal_dhu` / `triton_dhu_dqkwg` / `triton_all`: experimental hybrids involving `bwd_dhu`; run them only with `--include-dhu-hybrid` or explicit `--variant`.
 
 Read the result as follows:
 
 - If `ascendc` fails but `manual_ascendc` passes, the diagnostic has not reproduced the real wrapper failure. Do not blame `dqkwg` or WY from that run; inspect wrapper/autograd parity first.
+- If `ascendc` and `manual_ascendc` both fail, and `triton_dvlocal` passes, the likely bad operator is `npu_chunk_bwd_dv_local`.
 - If `ascendc` and `manual_ascendc` both fail, and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
 - If `ascendc` and `manual_ascendc` both fail, and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
 - If only `triton_both` or `triton_all` passes, the error is split across multiple backward branches.
-- If no Triton replacement passes, check earlier forward/backward intermediates (`h`, `v_new`, `A`) or a layout mismatch in the diagnostic.
+- If no non-`dhu` Triton replacement passes, inspect upstream backward intermediates first: `dv_local`, `dv_mid`, and then `bwd_dhu`.
 
-The script also prints component deltas for `dk_from_dqkwg` and `dk_from_wy`, so the final verdict is not based only on one full-gradient pass/fail.
+The script also prints component deltas for `dk_from_dqkwg`, `dk_from_wy`, `dv_local`, `dv_mid`, and `dh`, so the final verdict is not based only on one full-gradient pass/fail.
 
 To avoid trusting an invalid hybrid replacement, run the gated bisect suite once:
 
@@ -351,6 +353,7 @@ To reduce compile/runtime further, run one candidate at a time:
 
 ```bash
 MODE=target VARIANT=ascendc bash run_gradk_bisect_suite.sh
+MODE=target VARIANT=triton_dvlocal bash run_gradk_bisect_suite.sh
 MODE=target VARIANT=triton_dqkwg bash run_gradk_bisect_suite.sh
 MODE=target VARIANT=triton_wy bash run_gradk_bisect_suite.sh
 MODE=target VARIANT=triton_both bash run_gradk_bisect_suite.sh
@@ -362,6 +365,14 @@ Only treat a replacement as usable if the full gated summary says:
 - `target_grad_k_ok=True`: the replacement fixes the failing partial-tail case.
 
 The suite also prints `diagnostic gate`. If it says `wrapper fails but manual internal chain passes`, ignore `replacement validity`: the hand-reconstructed chain is missing some real wrapper behavior, so late-op replacement conclusions are not valid yet.
+
+If you need to separate the l2norm saved-input contract from the varlen-tail issue, rerun the target with:
+
+```bash
+MODE=target MANUAL_L2NORM_BWD_INPUT=original bash run_gradk_bisect_suite.sh
+```
+
+Keep the default `normalized` mode for FLA-npu wrapper parity unless you are explicitly testing the saved-original q/k contract.
 
 `triton_full` is the baseline for "pure Triton is good on this shape"; `triton_dqkwg`, `triton_wy`, and `triton_both` are candidate operator replacements. Do not use `triton_dhu` conclusions unless the explicit `bwd_dhu` hybrid first proves it can compile and pass the control cases.
 
