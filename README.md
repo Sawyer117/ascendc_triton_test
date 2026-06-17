@@ -191,6 +191,49 @@ Run a larger optional pass only after the default suite is understood:
 RUN_LARGE=1 bash run_precision_suite.sh
 ```
 
+## Locate The Bad Backward Branch
+
+When the suite shows only `grad_k` failing for partial-tail varlen cases, run the operator-level diagnostic:
+
+```bash
+python diagnose_gradk_operator.py \
+  --case varlen \
+  --fla-repo ./flash-linear-attention-npu \
+  --device 0 \
+  --output-json ./precision_results/diagnose_varlen_1121.json
+```
+
+For the single-segment partial-tail repro:
+
+```bash
+python diagnose_gradk_operator.py \
+  --case varlen \
+  --cu-seqlens 0,1121 \
+  --heads 8 \
+  --key-dim 128 \
+  --value-dim 128 \
+  --chunk-size 64 \
+  --fla-repo ./flash-linear-attention-npu \
+  --device 0 \
+  --output-json ./precision_results/diagnose_single_1121.json
+```
+
+The diagnostic runs four variants:
+
+- `ascendc`: original full AscendC backward.
+- `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
+- `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
+- `triton_both`: both branches are replaced.
+
+Read the result as follows:
+
+- If `ascendc` fails and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
+- If `ascendc` fails and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
+- If only `triton_both` passes, the error is split across the two backward branches.
+- If no Triton replacement passes, check the earlier backward inputs (`dv`, `dh`, `h`, `v_new`) or a layout mismatch in the diagnostic.
+
+The script also prints component deltas for `dk_from_dqkwg` and `dk_from_wy`, so the final verdict is not based only on one full-gradient pass/fail.
+
 To test the creative/MindSpeed-MM wrapper instead of the FLA-npu standalone example, run the same suite with `IMPL=creative` and point `CREATIVE_REPO` at that checkout:
 
 ```bash
