@@ -10,6 +10,7 @@ OUT_DIR=${OUT_DIR:-./creative_pair_results}
 RUN_FULL_L2NORM=${RUN_FULL_L2NORM:-1}
 
 mkdir -p "${OUT_DIR}"
+find "${OUT_DIR}" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' -o -name 'summary.txt' \) -delete
 
 run_case() {
   local name=$1
@@ -19,7 +20,7 @@ run_case() {
   local log="${OUT_DIR}/${name}.log"
   local l2norm_args=()
   if [[ "${l2norm_mode}" == "core" ]]; then
-    l2norm_args+=(--no-qk-l2norm)
+    l2norm_args+=(--no-qk-l2norm --pre-normalize-qk)
   fi
   local cmd=(
     "${PYTHON}" "${SCRIPT_DIR}/compare_creative_gdn_pair.py"
@@ -126,6 +127,7 @@ for path in sorted(out_dir.glob("*.json")):
         tail,
         case.get("mindspeed_triton_shim_used"),
         case.get("use_qk_l2norm_in_kernel"),
+        case.get("pre_normalize_qk"),
     ))
 
 summary_path = out_dir / "summary.txt"
@@ -134,14 +136,14 @@ with summary_path.open("w", encoding="utf-8") as f:
         if len(row) == 3:
             f.write(f"{row[0]}\t{row[1]}\t{row[2]}\n")
             continue
-        name, passed, failed, worst_name, worst, tail, shim, l2norm = row
+        name, passed, failed, worst_name, worst, tail, shim, l2norm, pre_norm = row
         worst_text = "-" if worst is None else f"{worst_name} max_abs={worst['max_abs']:.6g} rms={worst['rms']:.6g} mismatch={worst['mismatch_ratio']:.6g}"
         tail_text = "tail=-"
         if tail:
             stats = tail["stats"]
             tail_text = f"tail_grad_k allclose={stats['allclose']} max_abs={stats['max_abs']:.6g} rms={stats['rms']:.6g} mismatch={stats['mismatch_ratio']:.6g}"
         f.write(
-            f"{name}\tpassed={passed}\tl2norm={l2norm}\tfailed={','.join(failed) or '-'}\t{worst_text}\t{tail_text}\tshim={shim}\n"
+            f"{name}\tpassed={passed}\tl2norm={l2norm}\tpre_norm={pre_norm}\tfailed={','.join(failed) or '-'}\t{worst_text}\t{tail_text}\tshim={shim}\n"
         )
 
 print(f"summary: {summary_path}")

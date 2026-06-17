@@ -51,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
     parser.add_argument("--no-qk-l2norm", action="store_true")
+    parser.add_argument(
+        "--pre-normalize-qk",
+        action="store_true",
+        help="Normalize q/k once in the test harness before calling both implementations.",
+    )
     parser.add_argument("--output-json", type=str)
     parser.add_argument("--tail-topk", type=int, default=8)
     parser.add_argument(
@@ -348,6 +353,10 @@ def segment_summary(case: cmp.Case):
     }
 
 
+def _l2norm_input(x, eps: float = 1e-6):
+    return (x * cmp.torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)).to(x.dtype)
+
+
 def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_used: bool, creative_repo: Path):
     torch = cmp.torch
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -357,6 +366,9 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         torch.npu.set_compile_mode(jit_compile=False)
 
     inputs = cmp.make_inputs(case, device, dtype, args.seed)
+    if args.pre_normalize_qk:
+        q, k, v, beta, g, cu = inputs
+        inputs = (_l2norm_input(q), _l2norm_input(k), v, beta, g, cu)
     use_qk_l2norm = not args.no_qk_l2norm
 
     torch.manual_seed(args.seed + 1)
@@ -379,6 +391,8 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         f"V={case.value_dim}",
         f"chunk_size={case.chunk_size}",
         f"varlen={case.cu_seqlens is not None}",
+        f"pre_normalize_qk={args.pre_normalize_qk}",
+        f"wrapper_l2norm={use_qk_l2norm}",
         flush=True,
     )
 
@@ -395,6 +409,7 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         "atol": args.atol,
         "rtol": args.rtol,
         "use_qk_l2norm_in_kernel": use_qk_l2norm,
+        "pre_normalize_qk": args.pre_normalize_qk,
         "creative_repo": str(creative_repo),
         "mindspeed_triton_shim_used": shim_used,
         "baseline": "creative_pure_triton_file: mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py",

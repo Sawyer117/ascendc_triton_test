@@ -27,7 +27,7 @@ export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp
 bash run_creative_pair_suite.sh
 ```
 
-By default this uses `./creative_snapshot` and runs two layers for each safe case: `*_core` disables q/k l2norm to isolate the GDN operator chain, while `*_full_l2norm` lets the pure and mixed wrappers each use their own q/k l2norm path. This keeps core-GDN and full-wrapper conclusions separate.
+By default this uses `./creative_snapshot` and runs two layers for each safe case: `*_core` pre-normalizes q/k once in the test harness and disables wrapper q/k l2norm to isolate the GDN operator chain, while `*_full_l2norm` feeds raw q/k and lets the pure and mixed wrappers each use their own q/k l2norm path. This keeps core-GDN and full-wrapper conclusions separate.
 
 To validate a newer creative branch instead of the vendored snapshot, override it explicitly:
 
@@ -40,7 +40,7 @@ The suite writes to `./creative_pair_results/` and compares `output`, `grad_q`, 
 Optional modes:
 
 ```bash
-# Skip the full-wrapper l2norm layer and run only core-GDN comparisons.
+# Skip the full-wrapper l2norm layer and run only pre-normalized core-GDN comparisons.
 RUN_FULL_L2NORM=0 bash run_creative_pair_suite.sh
 
 # Run multi-segment unaligned cases that can currently trigger an AICore exception.
@@ -59,6 +59,7 @@ python compare_creative_gdn_pair.py \
   --chunk-size 64 \
   --device 0 \
   --no-qk-l2norm \
+  --pre-normalize-qk \
   --output-json ./creative_pair_results/varlen_single_1121.json
 ```
 
