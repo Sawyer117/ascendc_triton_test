@@ -22,9 +22,32 @@ Known-good family from the FLA-npu notes:
 - Ascend PyTorch release `v26.1.0-beta.1`
 - `torch==2.7.1`
 - `torch_npu==2.7.1.post5`, matching your Python ABI and CPU arch
-- `triton-ascend`, `pybind11`, and `flash-linear-attention-npu/requirements.txt`
+- `triton-ascend==3.2.1`, `pybind11`, and `flash-linear-attention-npu/requirements.txt`
 
 If `torch_custom/fla_npu/build.sh` reports `No module named torchnpugen`, your `torch_npu` wheel is missing or from the wrong release family. The matching `torch_npu` wheel should provide `torchnpugen`.
+
+## Install Triton-Ascend
+
+For CANN 9.0.0, install `triton-ascend==3.2.1` from Huawei Cloud's Ascend package index. It is not published on the public PyPI index, so `pip install triton-ascend==3.2.1` without the Ascend index will fail.
+
+```bash
+python -m pip uninstall -y triton triton-ascend
+python -m pip install --no-cache-dir triton-ascend==3.2.1 \
+  --extra-index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+Verify that `import triton` resolves inside this environment:
+
+```bash
+python - <<'PY'
+import triton
+print("triton", getattr(triton, "__version__", "unknown"))
+print(triton.__file__)
+PY
+```
+
+This repo only needs Triton-Ascend for the FLA-npu helper kernels. Do not install `vllm-ascend` or switch to the `torch-npu==2.10.0` stack from Speculators/vLLM deployment guides in this environment.
 
 ## Install Or Refresh FLA-npu Ops
 
@@ -154,6 +177,6 @@ Default tolerance is `atol=1e-2`, `rtol=1e-2`.
 ## Common Errors
 
 - `No module named mindspeed_mm`: run `git pull`; the current script has no MindSpeed-MM import.
-- `No module named triton`: install `triton-ascend`; avoid mixing it with community `triton` for older Ascend releases.
+- `No module named triton`: install `triton-ascend==3.2.1` with the Huawei Cloud Ascend index shown above.
 - `fla_npu failed to import`: install `torch_custom/fla_npu`, export `LD_LIBRARY_PATH`, and run outside `torch_custom/fla_npu`.
 - Missing `torch.ops.npu.*`: reinstall the FLA-npu `.run` package and rebuild the `fla_npu` wheel in the same Python environment.
