@@ -97,7 +97,7 @@ python compare_gdn_precision.py \
   --case varlen \
   --fla-repo ./flash-linear-attention-npu \
   --device 0 \
-  --output-json /tmp/gdn_varlen.json
+  --output-json ./gdn_varlen.json
 ```
 
 If the FLA-npu repo is elsewhere, point `--fla-repo` to that checkout:
@@ -115,7 +115,7 @@ python compare_gdn_precision.py --case small --fla-repo ./flash-linear-attention
 Run all bundled cases:
 
 ```bash
-python compare_gdn_precision.py --case all --fla-repo ./flash-linear-attention-npu --device 0 --output-json /tmp/gdn_all.json
+python compare_gdn_precision.py --case all --fla-repo ./flash-linear-attention-npu --device 0 --output-json ./gdn_all.json
 ```
 
 Run a custom packed varlen shape:
