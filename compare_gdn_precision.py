@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -79,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--creative-repo",
         default=os.environ.get("CREATIVE_REPO"),
-        help="Path to the creative/MindSpeed-MM repo when --impl creative is used.",
+        help="Path to the creative checkout when --impl creative is used.",
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int, help="Override batch size.")
@@ -190,21 +191,83 @@ def find_creative_repo(path_arg: str | None) -> Path | None:
     return None
 
 
+def _make_module(name: str):
+    module = types.ModuleType(name)
+    module.__path__ = []  # type: ignore[attr-defined]
+    return module
+
+
+def _load_module_from_path(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def _install_creative_package(creative_repo: Path) -> str:
+    qwen_dir = creative_repo / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5"
+    triton_dir = qwen_dir / "triton"
+    package = "_creative_qwen3_5_cmp"
+    pkg = types.ModuleType(package)
+    pkg.__path__ = [str(qwen_dir)]  # type: ignore[attr-defined]
+    sys.modules[package] = pkg
+    triton_pkg = types.ModuleType(f"{package}.triton")
+    triton_pkg.__path__ = [str(triton_dir)]  # type: ignore[attr-defined]
+    sys.modules[f"{package}.triton"] = triton_pkg
+    return package
+
+
+def _install_mindspeed_triton_shim(package: str) -> None:
+    sys.modules.setdefault("mindspeed", _make_module("mindspeed"))
+    sys.modules.setdefault("mindspeed.lite", _make_module("mindspeed.lite"))
+    sys.modules.setdefault("mindspeed.lite.ops", _make_module("mindspeed.lite.ops"))
+    sys.modules.setdefault("mindspeed.lite.ops.triton", _make_module("mindspeed.lite.ops.triton"))
+    for short in ("chunk_scaled_dot_kkt", "wy_fast", "solve_tril", "cumsum", "utils"):
+        sys.modules[f"mindspeed.lite.ops.triton.{short}"] = importlib.import_module(f"{package}.triton.{short}")
+
+    l2norm_module = types.ModuleType("mindspeed.lite.ops.triton.l2norm")
+
+    def l2norm_fwd(x, eps: float = 1e-6):
+        rstd = torch.rsqrt((x.float() * x.float()).sum(dim=-1, keepdim=True) + eps)
+        return (x.float() * rstd).to(x.dtype), rstd.to(x.dtype)
+
+    def l2norm_bwd(x, rstd, dy):
+        x_f = x.float()
+        dy_f = dy.float()
+        rstd_f = rstd.float()
+        y = x_f * rstd_f
+        dx = (dy_f - y * (dy_f * y).sum(dim=-1, keepdim=True)) * rstd_f
+        return dx.to(x.dtype)
+
+    l2norm_module.l2norm_fwd = l2norm_fwd
+    l2norm_module.l2norm_bwd = l2norm_bwd
+    sys.modules["mindspeed.lite.ops.triton.l2norm"] = l2norm_module
+
+
 def load_creative_gdn(creative_repo_arg: str | None):
     import_torch_runtime()
     check_npu_runtime()
 
     creative_repo = find_creative_repo(creative_repo_arg)
-    if creative_repo is not None and str(creative_repo) not in sys.path:
-        sys.path.insert(0, str(creative_repo))
-
+    if creative_repo is None:
+        raise RuntimeError("Cannot find creative implementation. Pass --creative-repo /path/to/qwen3.5_omni_creative.")
+    package = _install_creative_package(creative_repo)
+    module_name = f"{package}.flash_gated_delta_rule"
+    module_path = creative_repo / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5" / "flash_gated_delta_rule.py"
     try:
-        module = importlib.import_module("mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule")
-    except ImportError as exc:
-        raise RuntimeError(
-            "Cannot import creative implementation. Run from the creative repo or pass "
-            "--creative-repo /path/to/qwen3.5_omni_creative with its Python dependencies installed."
-        ) from exc
+        module = _load_module_from_path(module_name, module_path)
+    except ModuleNotFoundError as exc:
+        if not (exc.name or "").startswith("mindspeed"):
+            raise
+        _install_mindspeed_triton_shim(package)
+        module = _load_module_from_path(module_name, module_path)
     return module.flash_gated_delta_rule, creative_repo
 
 

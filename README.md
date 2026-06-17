@@ -326,7 +326,7 @@ To test the creative/MindSpeed-MM wrapper instead of the FLA-npu standalone exam
 IMPL=creative CREATIVE_REPO=/path/to/qwen3.5_omni_creative bash run_precision_suite.sh
 ```
 
-The two implementations use the same GDN math structure, but they are not byte-for-byte identical: the default `fla` mode imports `flash-linear-attention-npu/examples/flash_gated_delta_rule.py`, while `creative` imports `mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule`.
+The two implementations use the same GDN math structure, but they are not byte-for-byte identical: the default `fla` mode loads `flash-linear-attention-npu/examples/flash_gated_delta_rule.py`, while `creative` loads `mindspeed_mm/fsdp/models/qwen3_5/flash_gated_delta_rule.py` by file path.
 
 ## Run Individual Cases
 

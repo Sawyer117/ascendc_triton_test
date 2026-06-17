@@ -4,8 +4,8 @@
 This script intentionally compares the two implementations from the creative
 repo itself:
 
-  * pure Triton: mindspeed_mm.fsdp.models.qwen3_5.chunk_gated_delta_rule
-  * AscendC mixed: mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule
+  * pure Triton: mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py
+  * AscendC mixed: mindspeed_mm/fsdp/models/qwen3_5/flash_gated_delta_rule.py
 
 It does not use flash-linear-attention-npu/examples as a substitute wrapper.
 """
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--creative-repo",
         default=os.environ.get("CREATIVE_REPO"),
-        help="Path to qwen3.5_omni_creative / MindSpeed-MM checkout.",
+        help="Path to qwen3.5_omni_creative checkout.",
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int, help="Override batch size.")
@@ -90,14 +90,34 @@ def make_module(name: str) -> types.ModuleType:
     return module
 
 
-def install_mindspeed_triton_shim() -> None:
-    """Map mindspeed.lite.ops.triton.* to creative's qwen3_5 Triton modules.
+def load_module_from_path(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
-    The creative mixed implementation imports helper Triton kernels from
-    mindspeed.lite.ops.triton, while this checkout may only contain the local
-    mindspeed_mm.fsdp.models.qwen3_5.triton package. This shim is recorded in
-    the JSON output so it is visible when used.
-    """
+
+def install_creative_file_package(creative_repo: Path) -> str:
+    """Create a synthetic package for qwen3_5 files without importing mindspeed_mm."""
+    qwen_dir = creative_repo / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5"
+    triton_dir = qwen_dir / "triton"
+    package = "_creative_qwen3_5_under_test"
+
+    pkg = types.ModuleType(package)
+    pkg.__path__ = [str(qwen_dir)]  # type: ignore[attr-defined]
+    sys.modules[package] = pkg
+
+    triton_pkg = types.ModuleType(f"{package}.triton")
+    triton_pkg.__path__ = [str(triton_dir)]  # type: ignore[attr-defined]
+    sys.modules[f"{package}.triton"] = triton_pkg
+    return package
+
+
+def install_mindspeed_triton_shim(package: str) -> None:
+    """Map mindspeed.lite.ops.triton.* to the synthetic creative Triton package."""
 
     torch = cmp.torch
 
@@ -106,9 +126,8 @@ def install_mindspeed_triton_shim() -> None:
     sys.modules.setdefault("mindspeed.lite.ops", make_module("mindspeed.lite.ops"))
     sys.modules.setdefault("mindspeed.lite.ops.triton", make_module("mindspeed.lite.ops.triton"))
 
-    base = "mindspeed_mm.fsdp.models.qwen3_5.triton"
     for short in ("chunk_scaled_dot_kkt", "wy_fast", "solve_tril", "cumsum", "utils"):
-        sys.modules[f"mindspeed.lite.ops.triton.{short}"] = importlib.import_module(f"{base}.{short}")
+        sys.modules[f"mindspeed.lite.ops.triton.{short}"] = importlib.import_module(f"{package}.triton.{short}")
 
     l2norm_module = types.ModuleType("mindspeed.lite.ops.triton.l2norm")
 
@@ -131,19 +150,28 @@ def install_mindspeed_triton_shim() -> None:
 
 
 def import_creative_pair(creative_repo: Path, allow_shim: bool):
-    if str(creative_repo) not in sys.path:
-        sys.path.insert(0, str(creative_repo))
+    package = install_creative_file_package(creative_repo)
+    qwen_dir = creative_repo / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5"
 
     shim_used = False
-    pure_module = importlib.import_module("mindspeed_mm.fsdp.models.qwen3_5.chunk_gated_delta_rule")
+    pure_module = load_module_from_path(
+        f"{package}.chunk_gated_delta_rule",
+        qwen_dir / "chunk_gated_delta_rule.py",
+    )
     try:
-        mixed_module = importlib.import_module("mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule")
+        mixed_module = load_module_from_path(
+            f"{package}.flash_gated_delta_rule",
+            qwen_dir / "flash_gated_delta_rule.py",
+        )
     except ModuleNotFoundError as exc:
         if not allow_shim or not (exc.name or "").startswith("mindspeed"):
             raise
-        install_mindspeed_triton_shim()
+        install_mindspeed_triton_shim(package)
         shim_used = True
-        mixed_module = importlib.import_module("mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule")
+        mixed_module = load_module_from_path(
+            f"{package}.flash_gated_delta_rule",
+            qwen_dir / "flash_gated_delta_rule.py",
+        )
 
     return pure_module.chunk_gated_delta_rule, mixed_module.flash_gated_delta_rule, shim_used
 
@@ -362,8 +390,8 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         "use_qk_l2norm_in_kernel": use_qk_l2norm,
         "creative_repo": str(creative_repo),
         "mindspeed_triton_shim_used": shim_used,
-        "baseline": "creative_pure_triton: mindspeed_mm.fsdp.models.qwen3_5.chunk_gated_delta_rule.chunk_gated_delta_rule",
-        "actual": "creative_ascendc_mixed: mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule.flash_gated_delta_rule",
+        "baseline": "creative_pure_triton_file: mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py",
+        "actual": "creative_ascendc_mixed_file: mindspeed_mm/fsdp/models/qwen3_5/flash_gated_delta_rule.py",
         "passed": not failed,
         "failed_tensors": failed,
         "comparisons": comparisons,
