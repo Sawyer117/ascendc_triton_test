@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import os
 import warnings
 from typing import Optional, List
 
@@ -303,6 +304,12 @@ def flash_gated_delta_rule(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
+    l2norm_mode = os.environ.get("CREATIVE_FLASH_QK_L2NORM_MODE", "outer")
+    if l2norm_mode not in {"outer", "kernel"}:
+        raise ValueError(
+            f"CREATIVE_FLASH_QK_L2NORM_MODE must be 'outer' or 'kernel', got {l2norm_mode!r}."
+        )
+
     def l2norm(x: torch.FloatTensor, dim: int = -1, eps: float = 1e-6):
         """This function is intended to align with the l2norm implementation in the Triton path."""
         original_dtype = x.dtype
@@ -310,7 +317,7 @@ def flash_gated_delta_rule(
         # Counteract verl's autocast promotion (bf16 -> fp32) by restoring original dtype.
         return (x * inv_norm).to(original_dtype)
 
-    if use_qk_l2norm_in_kernel:
+    if use_qk_l2norm_in_kernel and l2norm_mode == "outer":
         q = l2norm(q, dim=-1, eps=1e-6)
         k = l2norm(k, dim=-1, eps=1e-6)
         use_qk_l2norm_in_kernel = False

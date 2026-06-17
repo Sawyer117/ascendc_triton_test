@@ -73,6 +73,29 @@ Interpretation:
 - If creative mixed is worse, the next engineering step is to port the cleaner FLA-npu wrapper logic into creative, then re-run the creative pair test. Do not make that code change in this test repo.
 - If creative pair matches the FLA-npu behavior, use the FLA-npu/PyTorch-reference scripts to quantify the installed AscendC op issue and hand the failing shapes/metrics to the kernel owner.
 
+
+## L2Norm Mode Suite
+
+Use this when you need to prove whether the q/k l2norm path is the only reason full-wrapper precision differs. It runs the same creative-vs-creative GDN cases twice:
+
+- `outer`: fixed path. The mixed flash wrapper applies the same Python/autograd l2norm as the Triton baseline before entering the custom autograd Function.
+- `kernel`: old path. The mixed flash wrapper leaves `use_qk_l2norm_in_kernel=True`, so the custom Function uses `mindspeed.lite.ops.triton.l2norm_fwd/bwd`.
+
+It also runs a standalone l2norm check against Python autograd for the same shapes. By default the standalone test tries to import the real external `mindspeed.lite.ops.triton.l2norm`; if that package is absent it reports `skipped=True` instead of pretending the local shim is a real kernel. Use `L2NORM_SOURCE=shim` only when you explicitly want to test the fallback shim contract.
+
+```bash
+bash run_l2norm_mode_suite.sh
+
+# Optional: test the local shim instead of the real external l2norm package.
+L2NORM_SOURCE=shim bash run_l2norm_mode_suite.sh
+```
+
+Read `./l2norm_mode_results/summary.txt`:
+
+- If all `outer` GDN rows pass and `kernel` fails, the remaining mismatch is in the l2norm path rather than the GDN core.
+- If `kernel` fails for fixed/aligned cases too, then the problem is not limited to non-64-aligned varlen.
+- In standalone l2norm rows, `original_input_ok` versus `normalized_output_ok` shows which backward contract the available `l2norm_bwd` actually implements. The old flash path passes the normalized output into `l2norm_bwd`, so `normalized_output_ok=False` directly explains q/k gradient failure.
+
 ## Expected Environment
 
 Run on the Ascend server with the same Python environment that has working `torch`, `torch_npu`, and `fla_npu`.

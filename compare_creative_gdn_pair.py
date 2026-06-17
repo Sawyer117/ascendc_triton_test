@@ -56,6 +56,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Normalize q/k once in the test harness before calling both implementations.",
     )
+    parser.add_argument(
+        "--mixed-l2norm-mode",
+        choices=["outer", "kernel"],
+        default=os.environ.get("CREATIVE_FLASH_QK_L2NORM_MODE", "outer"),
+        help=(
+            "How the AscendC-mixed flash wrapper applies q/k l2norm when --no-qk-l2norm is not set. "
+            "outer uses the fixed Python/autograd norm before the custom Function; "
+            "kernel preserves the old internal l2norm_fwd/bwd path."
+        ),
+    )
     parser.add_argument("--output-json", type=str)
     parser.add_argument("--tail-topk", type=int, default=8)
     parser.add_argument(
@@ -393,6 +403,7 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         f"varlen={case.cu_seqlens is not None}",
         f"pre_normalize_qk={args.pre_normalize_qk}",
         f"wrapper_l2norm={use_qk_l2norm}",
+        f"mixed_l2norm_mode={args.mixed_l2norm_mode}",
         flush=True,
     )
 
@@ -410,6 +421,7 @@ def run_case(case: cmp.Case, args: argparse.Namespace, pure_fn, mixed_fn, shim_u
         "rtol": args.rtol,
         "use_qk_l2norm_in_kernel": use_qk_l2norm,
         "pre_normalize_qk": args.pre_normalize_qk,
+        "mixed_l2norm_mode": args.mixed_l2norm_mode,
         "creative_repo": str(creative_repo),
         "mindspeed_triton_shim_used": shim_used,
         "baseline": "creative_pure_triton_file: mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py",
@@ -426,6 +438,7 @@ def main() -> int:
     try:
         torch, _ = cmp.import_torch_runtime()
         creative_repo = find_creative_repo(args.creative_repo)
+        os.environ["CREATIVE_FLASH_QK_L2NORM_MODE"] = args.mixed_l2norm_mode
         ensure_runtime_for_mixed_ops()
         pure_fn, mixed_fn, shim_used = import_creative_pair(
             creative_repo, allow_shim=not args.no_mindspeed_triton_shim
