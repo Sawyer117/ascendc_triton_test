@@ -230,16 +230,14 @@ The diagnostic also writes the same tail reports into JSON under each variant's 
 The diagnostic runs these variants:
 
 - `ascendc`: original full AscendC backward.
-- `triton_dhu`: only `npu_chunk_gated_delta_rule_bwd_dhu` is replaced by the local Triton kernel.
 - `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
 - `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
-- `triton_dhu_dqkwg`: replace `bwd_dhu` and `dqkwg`.
 - `triton_both`: replace `dqkwg` and WY backward, but keep `bwd_dhu` as AscendC.
-- `triton_all`: replace `bwd_dhu`, `dqkwg`, and WY backward.
+- `triton_dhu`: experimental hybrid that replaces only `npu_chunk_gated_delta_rule_bwd_dhu`; it is not included in default `--variant all` because it can hit Triton-Ascend UB-limit compilation failures when isolated from the full Triton graph.
+- `triton_dhu_dqkwg` / `triton_all`: experimental hybrids involving `bwd_dhu`; run them only with `--include-dhu-hybrid` or explicit `--variant`.
 
 Read the result as follows:
 
-- If `ascendc` fails and `triton_dhu` passes, the likely bad operator is `npu_chunk_gated_delta_rule_bwd_dhu`.
 - If `ascendc` fails and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
 - If `ascendc` fails and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
 - If only `triton_both` or `triton_all` passes, the error is split across multiple backward branches.

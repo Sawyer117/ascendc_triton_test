@@ -80,6 +80,11 @@ def parse_args() -> argparse.Namespace:
         help="Number of largest grad_k tail errors to print and write to JSON.",
     )
     parser.add_argument(
+        "--include-dhu-hybrid",
+        action="store_true",
+        help="Include experimental bwd_dhu Triton hybrid variants when --variant all is used.",
+    )
+    parser.add_argument(
         "--variant",
         choices=[*VARIANTS.keys(), "all"],
         default="all",
@@ -793,7 +798,13 @@ def main() -> int:
         )
         reference = run_reference(case, args, inputs, do)
 
-        names = list(VARIANTS) if args.variant == "all" else [args.variant]
+        if args.variant == "all":
+            names = [
+                name for name, flags in VARIANTS.items()
+                if args.include_dhu_hybrid or not flags[0]
+            ]
+        else:
+            names = [args.variant]
         raw_results = {}
         variant_results = {}
         for name in names:
