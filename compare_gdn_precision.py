@@ -214,6 +214,16 @@ def varlen_to_nonvarlen(cu_seqlens, *inputs):
     return outputs[0] if len(outputs) == 1 else outputs
 
 
+def varlen_valid_mask(cu_seqlens, device):
+    cu = [int(x) for x in cu_seqlens.detach().cpu().tolist()]
+    batch = len(cu) - 1
+    max_len = max(cu[i + 1] - cu[i] for i in range(batch))
+    mask = torch.zeros(batch, max_len, device=device, dtype=torch.bool)
+    for i in range(batch):
+        mask[i, : cu[i + 1] - cu[i]] = True
+    return mask
+
+
 def ref_torch_chunk_gated_delta_rule(
     query,
     key,
@@ -314,9 +324,22 @@ def clone_leaf(x):
     return x.detach().clone().requires_grad_(True)
 
 
-def tensor_stats(actual, expected, atol: float, rtol: float) -> dict[str, object]:
+def tensor_stats(actual, expected, atol: float, rtol: float, mask=None) -> dict[str, object]:
     actual_f = actual.detach().float()
     expected_f = expected.detach().float()
+    if actual_f.shape != expected_f.shape:
+        raise ValueError(f"shape mismatch: actual={tuple(actual_f.shape)}, expected={tuple(expected_f.shape)}")
+
+    if mask is not None:
+        mask = mask.to(device=actual_f.device, dtype=torch.bool)
+        while mask.ndim < actual_f.ndim:
+            mask = mask.unsqueeze(-1)
+        mask = mask.expand_as(actual_f)
+        actual_f = actual_f[mask]
+        expected_f = expected_f[mask]
+        if actual_f.numel() == 0:
+            raise ValueError("empty comparison mask")
+
     diff = actual_f - expected_f
     abs_diff = diff.abs()
     denom = expected_f.abs().clamp_min(1e-12)
@@ -326,6 +349,7 @@ def tensor_stats(actual, expected, atol: float, rtol: float) -> dict[str, object
     rms = torch.sqrt(torch.mean(diff * diff))
     return {
         "allclose": bool(torch.allclose(actual_f, expected_f, atol=atol, rtol=rtol)),
+        "numel": int(actual_f.numel()),
         "max_abs": float(abs_diff.max().item()),
         "mean_abs": float(abs_diff.mean().item()),
         "rms": float(rms.item()),
@@ -389,6 +413,7 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
     torch.npu.synchronize()
 
     if cu is not None:
+        valid_mask = varlen_valid_mask(cu, device)
         o_ac_cmp = varlen_to_nonvarlen(cu, o_ac)
         q_ac_g, k_ac_g, v_ac_g = [varlen_to_nonvarlen(cu, x.grad.transpose(1, 2).contiguous()) for x in (q_ac, k_ac, v_ac)]
         beta_ac_g, g_ac_g = varlen_to_nonvarlen(cu, beta_ac.grad, g_ac.grad)
@@ -400,18 +425,19 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
             g_ref_in.grad,
         )
     else:
+        valid_mask = None
         o_ac_cmp = o_ac
         q_ac_g, k_ac_g, v_ac_g = [x.grad.transpose(1, 2).contiguous() for x in (q_ac, k_ac, v_ac)]
         beta_ac_g, g_ac_g = beta_ac.grad, g_ac.grad
         q_ref_g, k_ref_g, v_ref_g, beta_ref_g, g_ref_g = q_ref.grad, k_ref.grad, v_ref.grad, beta_ref.grad, g_ref.grad
 
     comparisons = {
-        "output": tensor_stats(o_ac_cmp, o_ref, args.atol, args.rtol),
-        "grad_q": tensor_stats(q_ac_g, q_ref_g, args.atol, args.rtol),
-        "grad_k": tensor_stats(k_ac_g, k_ref_g, args.atol, args.rtol),
-        "grad_v": tensor_stats(v_ac_g, v_ref_g, args.atol, args.rtol),
-        "grad_beta": tensor_stats(beta_ac_g, beta_ref_g, args.atol, args.rtol),
-        "grad_g": tensor_stats(g_ac_g, g_ref_g, args.atol, args.rtol),
+        "output": tensor_stats(o_ac_cmp, o_ref, args.atol, args.rtol, valid_mask),
+        "grad_q": tensor_stats(q_ac_g, q_ref_g, args.atol, args.rtol, valid_mask),
+        "grad_k": tensor_stats(k_ac_g, k_ref_g, args.atol, args.rtol, valid_mask),
+        "grad_v": tensor_stats(v_ac_g, v_ref_g, args.atol, args.rtol, valid_mask),
+        "grad_beta": tensor_stats(beta_ac_g, beta_ref_g, args.atol, args.rtol, valid_mask),
+        "grad_g": tensor_stats(g_ac_g, g_ref_g, args.atol, args.rtol, valid_mask),
     }
     return {
         "case": case.__dict__,

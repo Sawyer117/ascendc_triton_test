@@ -108,7 +108,7 @@ PY
 
 All ops should print `True`.
 
-## Run Varlen Precision
+## Run The Staged Precision Suite
 
 Pull the current script first. If you see `No module named mindspeed_mm`, you are still running the old version.
 
@@ -116,6 +116,36 @@ Pull the current script first. If you see `No module named mindspeed_mm`, you ar
 cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test
 git pull
 export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
+bash run_precision_suite.sh
+```
+
+The suite writes logs and JSON under `./precision_results/`, then prints `./precision_results/summary.txt`. It runs fixed-length sanity first, then variable-length cases in this order:
+
+- `varlen_single_1024`: one packed segment, should behave like fixed length.
+- `varlen_aligned_1024`: multiple sequences with lengths aligned to `chunk_size`.
+- `varlen_unaligned_1121`: mixed non-aligned sequence lengths.
+- `varlen_short_mixed_1024`: very short and boundary-adjacent sequence lengths.
+- `varlen_many_2048`: more segments with mixed chunk counts.
+
+Interpretation:
+
+- Fixed-length failures mean the full wrapper/reference/environment is not clean; do not debug varlen yet.
+- Fixed passes but `varlen_single_1024` fails points to the varlen code path itself.
+- Single-segment passes but aligned multi-segment fails points to per-sequence reset or `cu_seqlens` handling.
+- Aligned passes but unaligned/short cases fail points to partial chunk or `chunk_indices` handling.
+- Forward output passes but gradients fail means the forward varlen metadata is probably OK; start drilling into backward ops.
+
+Run a larger optional pass only after the default suite is understood:
+
+```bash
+RUN_LARGE=1 bash run_precision_suite.sh
+```
+
+## Run Individual Cases
+
+Run one packed varlen case:
+
+```bash
 python compare_gdn_precision.py \
   --case varlen \
   --fla-repo ./flash-linear-attention-npu \
