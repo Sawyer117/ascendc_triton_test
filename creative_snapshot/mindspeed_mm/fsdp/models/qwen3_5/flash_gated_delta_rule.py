@@ -61,7 +61,7 @@ def flash_chunk_gated_delta_rule_fwd(
     A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
     w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, cu_seqlens=cu_seqlens)
 
-    _, _, cu_t, ch_t = _prep_indices(cu_seqlens, chunk_size, q.device)
+    cu_list, ch_list, _, _ = _prep_indices(cu_seqlens, chunk_size, q.device)
 
     # Transpose to head-first [B, H, T, K/V] for NPU ops
     q = q.transpose(1, 2).contiguous()
@@ -73,8 +73,8 @@ def flash_chunk_gated_delta_rule_fwd(
     h, v_new, final_state = torch.ops.npu.npu_chunk_gated_delta_rule_fwd_h(
         k, w, u, g,
         initial_state=initial_state,
-        cu_seqlens=cu_t,
-        chunk_indices=ch_t,
+        cu_seqlens=cu_list,
+        chunk_indices=ch_list,
         output_final_state=output_final_state,
         chunk_size=chunk_size,
     )
@@ -82,8 +82,8 @@ def flash_chunk_gated_delta_rule_fwd(
     o = torch.ops.npu.npu_chunk_fwd_o(
         q, k, v_new, h, scale,
         g=g,
-        cu_seqlens=cu_t,
-        chunk_indices=ch_t,
+        cu_seqlens=cu_list,
+        chunk_indices=ch_list,
         chunk_size=chunk_size,
     )
 
@@ -125,8 +125,8 @@ def flash_chunk_gated_delta_rule_bwd(
     h, v_new, _ = torch.ops.npu.npu_chunk_gated_delta_rule_fwd_h(
         k, w, u, g,
         initial_state=initial_state,
-        cu_seqlens=cu_t,
-        chunk_indices=ch_t,
+        cu_seqlens=cu_list,
+        chunk_indices=ch_list,
         output_final_state=False,
         chunk_size=chunk_size,
     )

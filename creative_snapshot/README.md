@@ -15,3 +15,10 @@ Source:
 
 The tests load these files by path through a synthetic package. They do not
 import the top-level mindspeed_mm package.
+
+Compatibility adjustment:
+
+- The vendored `flash_gated_delta_rule.py` passes Python `list[int]`
+  `cu_seqlens/chunk_indices` into `torch.ops.npu.*`, matching the currently
+  installed `fla_npu` op schema. The original creative wrapper used Tensor
+  variants for two forward calls, which fails against this schema.

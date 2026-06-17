@@ -244,16 +244,14 @@ def _install_mindspeed_triton_shim(package: str) -> None:
     l2norm_module = types.ModuleType("mindspeed.lite.ops.triton.l2norm")
 
     def l2norm_fwd(x, eps: float = 1e-6):
-        rstd = torch.rsqrt((x.float() * x.float()).sum(dim=-1, keepdim=True) + eps)
-        return (x.float() * rstd).to(x.dtype), rstd.to(x.dtype)
+        original_dtype = x.dtype
+        rstd = torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+        return (x * rstd).to(original_dtype), rstd
 
     def l2norm_bwd(x, rstd, dy):
-        x_f = x.float()
-        dy_f = dy.float()
-        rstd_f = rstd.float()
-        y = x_f * rstd_f
-        dx = (dy_f - y * (dy_f * y).sum(dim=-1, keepdim=True)) * rstd_f
-        return dx.to(x.dtype)
+        y = (x * rstd).to(x.dtype)
+        dot = (dy * y).sum(dim=-1, keepdim=True)
+        return ((dy - y * dot) * rstd).to(x.dtype)
 
     l2norm_module.l2norm_fwd = l2norm_fwd
     l2norm_module.l2norm_bwd = l2norm_bwd
