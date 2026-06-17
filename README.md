@@ -1,16 +1,56 @@
-# AscendC GDN Precision Test, No MindSpeed-MM
+# AscendC GDN Precision Tests
 
-This repo contains a standalone precision script for the FLA-npu Qwen3.5 GDN path.
-It does **not** import `mindspeed_mm`.
+This repo now has two precision-test layers:
 
-Current comparison:
+- `compare_creative_gdn_pair.py`: compares the creative repo's pure Triton GDN against its AscendC-mixed GDN. Use this first for the original creative-code question.
+- `compare_gdn_precision.py`: compares the FLA-npu example AscendC wrapper against an embedded PyTorch reference. Use this to characterize the installed AscendC custom ops after the creative path is understood.
 
-- AscendC path: `flash-linear-attention-npu/examples/flash_gated_delta_rule.py`
-- Baseline: pure PyTorch reference embedded in `compare_gdn_precision.py`
-- Checked tensors: forward output plus gradients of `q`, `k`, `v`, `beta`, and `g`
-- Supported cases: fixed length and packed varlen via `cu_seqlens`
+Both layers check forward output plus gradients of `q`, `k`, `v`, `beta`, and `g`, and both support fixed length plus packed varlen via `cu_seqlens`.
 
-The AscendC wrapper still imports helper kernels from the local FLA-npu repo, so you still need the FLA-npu Python dependencies such as `triton-ascend`. You do not need MindSpeed-MM.
+The AscendC-mixed paths still need the FLA-npu custom op package installed, because both creative and FLA-npu ultimately call `torch.ops.npu.*` custom ops.
+
+
+## Creative Pair Test
+
+For the original creative-code question, use `compare_creative_gdn_pair.py` or `run_creative_pair_suite.sh` first. This compares the two real implementations inside the creative repo:
+
+- Pure Triton baseline: `mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py`
+- AscendC mixed path: `mindspeed_mm/fsdp/models/qwen3_5/flash_gated_delta_rule.py`
+
+This is different from the older FLA-npu/PyTorch-reference test below. The FLA-npu test is still useful for characterizing the installed AscendC custom ops, but it is not a substitute for creative-vs-creative validation.
+
+Run from the test repo root:
+
+```bash
+cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test
+export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
+CREATIVE_REPO=/path/to/qwen3.5_omni_creative bash run_creative_pair_suite.sh
+```
+
+The suite writes to `./creative_pair_results/` and compares `output`, `grad_q`, `grad_k`, `grad_v`, `grad_beta`, and `grad_g`. It includes fixed-length controls, aligned varlen controls, and non-64-aligned packed-tail cases such as `cu_seqlens=0,1121`.
+
+Run one focused case:
+
+```bash
+python compare_creative_gdn_pair.py \
+  --creative-repo /path/to/qwen3.5_omni_creative \
+  --case varlen \
+  --cu-seqlens 0,1121 \
+  --heads 8 \
+  --key-dim 128 \
+  --value-dim 128 \
+  --chunk-size 64 \
+  --device 0 \
+  --output-json ./creative_pair_results/varlen_single_1121.json
+```
+
+If the creative mixed path imports `mindspeed.lite.ops.triton.*` but that external `mindspeed` package is absent, the script shims those helper imports to creative's local `mindspeed_mm/fsdp/models/qwen3_5/triton/*` modules and records `mindspeed_triton_shim_used=true` in JSON. Use `--no-mindspeed-triton-shim` to require the exact external import path.
+
+Interpretation:
+
+- If creative pure Triton vs creative AscendC mixed is worse than the FLA-npu/PyTorch-reference result, report the creative-wrapper mismatch first.
+- If creative mixed is worse, the next engineering step is to port the cleaner FLA-npu wrapper logic into creative, then re-run the creative pair test. Do not make that code change in this test repo.
+- If creative pair matches the FLA-npu behavior, use the FLA-npu/PyTorch-reference scripts to quantify the installed AscendC op issue and hand the failing shapes/metrics to the kernel owner.
 
 ## Expected Environment
 
