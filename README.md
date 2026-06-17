@@ -27,7 +27,7 @@ export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp
 bash run_creative_pair_suite.sh
 ```
 
-By default this uses `./creative_snapshot`, disables q/k l2norm (`QK_L2NORM=0`), and runs only the safe core-GDN cases. This keeps the first comparison focused on the GDN operator chain instead of l2norm shim differences or known AICore-crashing multi-segment unaligned cases.
+By default this uses `./creative_snapshot` and runs two layers for each safe case: `*_core` disables q/k l2norm to isolate the GDN operator chain, while `*_full_l2norm` lets the pure and mixed wrappers each use their own q/k l2norm path. This keeps core-GDN and full-wrapper conclusions separate.
 
 To validate a newer creative branch instead of the vendored snapshot, override it explicitly:
 
@@ -40,8 +40,8 @@ The suite writes to `./creative_pair_results/` and compares `output`, `grad_q`, 
 Optional modes:
 
 ```bash
-# Include q/k l2norm. This is a full-wrapper check, not the first-pass GDN core check.
-QK_L2NORM=1 bash run_creative_pair_suite.sh
+# Skip the full-wrapper l2norm layer and run only core-GDN comparisons.
+RUN_FULL_L2NORM=0 bash run_creative_pair_suite.sh
 
 # Run multi-segment unaligned cases that can currently trigger an AICore exception.
 RUN_UNSAFE=1 bash run_creative_pair_suite.sh
@@ -62,7 +62,7 @@ python compare_creative_gdn_pair.py \
   --output-json ./creative_pair_results/varlen_single_1121.json
 ```
 
-The focused command also defaults to `./creative_snapshot`. Pass `--creative-repo /path/to/qwen3.5_omni_creative` only when you intentionally want to test an external checkout. Omit `--no-qk-l2norm` only when you explicitly want the full q/k l2norm wrapper path.
+The focused command above is the core-GDN variant. Omit `--no-qk-l2norm` to run the full-wrapper variant where the pure and mixed implementations each use their own q/k l2norm path. Pass `--creative-repo /path/to/qwen3.5_omni_creative` only when you intentionally want to test an external checkout.
 
 If the creative mixed path imports `mindspeed.lite.ops.triton.*` but that external `mindspeed` package is absent, the script shims those helper imports to the snapshot's local `mindspeed_mm/fsdp/models/qwen3_5/triton/*` modules and records `mindspeed_triton_shim_used=true` in JSON. Use `--no-mindspeed-triton-shim` to require the exact external import path.
 
