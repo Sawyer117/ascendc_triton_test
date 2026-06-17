@@ -168,8 +168,10 @@ The suite writes logs and JSON under `./precision_results/`, then prints `./prec
 The bundled fixed-length cases use `K=128,V=128`; smaller K/V dimensions such as 64 are intentionally not used because the FLA-npu AscendC kernels are validated around `K=128` and can fail host-side tiling before a precision comparison starts.
 
 - `varlen_single_1024`: one packed segment, should behave like fixed length.
+- `varlen_single_1121`: one segment with total length not divisible by `chunk_size`.
 - `varlen_aligned_1024`: multiple sequences with lengths aligned to `chunk_size`.
-- `varlen_unaligned_1121`: mixed non-aligned sequence lengths.
+- `varlen_unaligned_1121`: mixed non-aligned sequence lengths, total length not divisible by `chunk_size`.
+- `varlen_unaligned_1152`: same mixed lengths plus one tail segment so total length is divisible by `chunk_size`.
 - `varlen_short_mixed_1024`: very short and boundary-adjacent sequence lengths.
 - `varlen_many_2048`: more segments with mixed chunk counts.
 
@@ -178,6 +180,8 @@ Interpretation:
 - Fixed-length failures mean the full wrapper/reference/environment is not clean; do not debug varlen yet.
 - Fixed passes but `varlen_single_1024` fails points to the varlen code path itself.
 - Single-segment passes but aligned multi-segment fails points to per-sequence reset or `cu_seqlens` handling.
+- `varlen_single_1121` failing points to packed total-length tail handling.
+- `varlen_unaligned_1121` failing but `varlen_unaligned_1152` passing points to packed total length not being a `chunk_size` multiple.
 - Aligned passes but unaligned/short cases fail points to partial chunk or `chunk_indices` handling.
 - Forward output passes but gradients fail means the forward varlen metadata is probably OK; start drilling into backward ops.
 

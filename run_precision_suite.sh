@@ -40,8 +40,27 @@ run_case() {
   if [[ "${rc}" == "0" ]]; then
     echo "    PASS"
   else
-    echo "    FAIL rc=${rc}; tail ${log}:"
-    tail -n 40 "${log}"
+    echo "    FAIL rc=${rc}"
+    if [[ -s "${json}" ]]; then
+      "${PYTHON}" - "${json}" <<'PY_FAIL'
+import json
+import sys
+
+path = sys.argv[1]
+payload = json.load(open(path, encoding="utf-8"))
+case = payload["cases"][0]
+print("    failed tensors:")
+for name, stats in case["comparisons"].items():
+    if not stats["allclose"]:
+        print(
+            f"      {name}: max_abs={stats['max_abs']:.6g} "
+            f"rms={stats['rms']:.6g} mismatch={stats['mismatch_ratio']:.6g} "
+            f"max_rel={stats['max_rel']:.6g}"
+        )
+PY_FAIL
+    fi
+    echo "    tail ${log}:"
+    tail -n 30 "${log}"
   fi
   echo ""
 }
@@ -58,8 +77,10 @@ run_case fixed_4k_h8 --case small --seq-len 4096 --heads 8 --key-dim 128 --value
 # 2) aligned segments avoid partial chunks;
 # 3) unaligned/mixed segments stress partial chunks and chunk metadata.
 run_case varlen_single_1024 --case varlen --cu-seqlens 0,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+run_case varlen_single_1121 --case varlen --cu-seqlens 0,1121 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 run_case varlen_aligned_1024 --case varlen --cu-seqlens 0,256,512,768,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 run_case varlen_unaligned_1121 --case varlen
+run_case varlen_unaligned_1152 --case varlen --cu-seqlens 0,112,209,240,281,489,523,566,689,721,785,837,985,1071,1121,1152 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 run_case varlen_short_mixed_1024 --case varlen --cu-seqlens 0,1,17,63,64,65,127,128,129,257,511,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 run_case varlen_many_2048 --case varlen --cu-seqlens 0,16,33,97,128,193,257,384,513,777,1024,1536,2048 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
