@@ -374,6 +374,14 @@ MODE=target MANUAL_L2NORM_BWD_INPUT=original bash run_gradk_bisect_suite.sh
 
 Keep the default `normalized` mode for FLA-npu wrapper parity unless you are explicitly testing the saved-original q/k contract.
 
+If `manual_ascendc` is NaN or all hybrid replacements still fail while `triton_full` passes, stop using replacement validity as a culprit signal and compare intermediate ops directly:
+
+```bash
+bash run_gradk_trace_suite.sh
+```
+
+This runs only `target_single_1121` by default and compares AscendC-op outputs with local Triton-op outputs on the same inputs: `g_cumsum`, solved `A`, `w/u`, `h/v_new`, `dv_local`, `dhu`, `dqkwg`, WY backward, and the pre-l2norm `dk` sum. Use `MODE=controls_and_target bash run_gradk_trace_suite.sh` only after the target trace is understood.
+
 `triton_full` is the baseline for "pure Triton is good on this shape"; `triton_dqkwg`, `triton_wy`, and `triton_both` are candidate operator replacements. Do not use `triton_dhu` conclusions unless the explicit `bwd_dhu` hybrid first proves it can compile and pass the control cases.
 
 To test the creative/MindSpeed-MM wrapper instead of the FLA-npu standalone example, run the same suite with `IMPL=creative` and point `CREATIVE_REPO` at that checkout:
