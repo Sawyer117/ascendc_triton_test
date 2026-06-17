@@ -246,13 +246,30 @@ Read the result as follows:
 
 The script also prints component deltas for `dk_from_dqkwg` and `dk_from_wy`, so the final verdict is not based only on one full-gradient pass/fail.
 
-To avoid trusting an invalid hybrid replacement, run the gated bisect suite:
+To avoid trusting an invalid hybrid replacement, run the gated bisect suite once:
 
 ```bash
 bash run_gradk_bisect_suite.sh
 ```
 
-It runs the same variants over three control cases (`fixed_1k_h8`, `varlen_single_1024`, `varlen_aligned_1024`) and the failing target (`target_single_1121`). Only treat a replacement as usable if the final summary says:
+It runs the same variants over three control cases (`fixed_1k_h8`, `varlen_single_1024`, `varlen_aligned_1024`) and the failing target (`target_single_1121`). The control cases are not new bug repros; they only prove a replacement does not break known-good fixed/aligned-varlen behavior.
+
+After the controls have passed, skip them and run only the failing partial-tail target:
+
+```bash
+MODE=target bash run_gradk_bisect_suite.sh
+```
+
+To reduce compile/runtime further, run one candidate at a time:
+
+```bash
+MODE=target VARIANT=ascendc bash run_gradk_bisect_suite.sh
+MODE=target VARIANT=triton_dqkwg bash run_gradk_bisect_suite.sh
+MODE=target VARIANT=triton_wy bash run_gradk_bisect_suite.sh
+MODE=target VARIANT=triton_both bash run_gradk_bisect_suite.sh
+```
+
+Only treat a replacement as usable if the full gated summary says:
 
 - `controls_ok=True`: the replacement preserves known-good cases.
 - `target_grad_k_ok=True`: the replacement fixes the failing partial-tail case.

@@ -6,6 +6,8 @@ FLA_REPO=${FLA_REPO:-./flash-linear-attention-npu}
 DEVICE=${DEVICE:-0}
 DTYPE=${DTYPE:-bf16}
 OUT_DIR=${OUT_DIR:-./precision_results/gradk_bisect}
+MODE=${MODE:-controls_and_target}
+VARIANT=${VARIANT:-all}
 
 mkdir -p "${OUT_DIR}"
 
@@ -15,6 +17,8 @@ echo "  fla_repo: ${FLA_REPO}"
 echo "  device:   ${DEVICE}"
 echo "  dtype:    ${DTYPE}"
 echo "  out_dir:  ${OUT_DIR}"
+echo "  mode:     ${MODE}"
+echo "  variant:  ${VARIANT}"
 echo
 
 run_case() {
@@ -27,7 +31,7 @@ run_case() {
     --fla-repo "${FLA_REPO}"
     --device "${DEVICE}"
     --dtype "${DTYPE}"
-    --variant all
+    --variant "${VARIANT}"
     --tail-topk 8
     --output-json "${json}"
     "$@"
@@ -46,24 +50,47 @@ run_case() {
   fi
 }
 
-run_case fixed_1k_h8 \
-  --case small --seq-len 1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+case "${MODE}" in
+  controls_and_target|all)
+    run_case fixed_1k_h8 \
+      --case small --seq-len 1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
-run_case varlen_single_1024 \
-  --case varlen --cu-seqlens 0,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+    run_case varlen_single_1024 \
+      --case varlen --cu-seqlens 0,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
-run_case varlen_aligned_1024 \
-  --case varlen --cu-seqlens 0,256,512,768,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+    run_case varlen_aligned_1024 \
+      --case varlen --cu-seqlens 0,256,512,768,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
-run_case target_single_1121 \
-  --case varlen --cu-seqlens 0,1121 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64 --tail-topk 16
+    run_case target_single_1121 \
+      --case varlen --cu-seqlens 0,1121 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64 --tail-topk 16
+    ;;
+  controls)
+    run_case fixed_1k_h8 \
+      --case small --seq-len 1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
-"${PYTHON}" - "${OUT_DIR}" <<'PY'
+    run_case varlen_single_1024 \
+      --case varlen --cu-seqlens 0,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+
+    run_case varlen_aligned_1024 \
+      --case varlen --cu-seqlens 0,256,512,768,1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
+    ;;
+  target)
+    run_case target_single_1121 \
+      --case varlen --cu-seqlens 0,1121 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64 --tail-topk 16
+    ;;
+  *)
+    echo "unknown MODE=${MODE}; expected controls_and_target, controls, or target" >&2
+    exit 2
+    ;;
+esac
+
+"${PYTHON}" - "${OUT_DIR}" "${VARIANT}" <<'PY'
 import json
 import pathlib
 import sys
 
 out_dir = pathlib.Path(sys.argv[1])
+variant_env = sys.argv[2]
 case_files = {
     "fixed_1k_h8": out_dir / "fixed_1k_h8.json",
     "varlen_single_1024": out_dir / "varlen_single_1024.json",
@@ -75,7 +102,10 @@ for name, path in case_files.items():
     if path.exists():
         cases[name] = json.loads(path.read_text())
 
-variants = ["ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both"]
+if variant_env == "all":
+    variants = ["ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both"]
+else:
+    variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]
 target = "target_single_1121"
 
@@ -125,6 +155,13 @@ print()
 print("replacement validity")
 for variant in variants:
     if variant == "ascendc":
+        continue
+    if not all(case in cases for case in controls):
+        print(
+            f"{variant:14s} "
+            "controls_ok=not_checked "
+            f"target_grad_k_ok={ok(variant_result(target, variant))}"
+        )
         continue
     control_ok = all(ok(variant_result(case, variant)) for case in controls)
     target_ok = ok(variant_result(target, variant))
