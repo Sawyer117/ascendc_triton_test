@@ -229,7 +229,8 @@ The diagnostic also writes the same tail reports into JSON under each variant's 
 
 The diagnostic runs these variants:
 
-- `ascendc`: original full AscendC backward.
+- `ascendc`: real FLA-npu `flash_gated_delta_rule(...).backward()` wrapper path. This must reproduce `compare_gdn_precision.py`.
+- `manual_ascendc`: hand-reconstructed internal AscendC op chain used only for debugging. It is not a deployable replacement.
 - `triton_full`: complete local Triton GDN forward/backward. This is the Triton baseline; it does not mix AscendC intermediates.
 - `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
 - `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
@@ -239,8 +240,9 @@ The diagnostic runs these variants:
 
 Read the result as follows:
 
-- If `ascendc` fails and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
-- If `ascendc` fails and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
+- If `ascendc` fails but `manual_ascendc` passes, the diagnostic has not reproduced the real wrapper failure. Do not blame `dqkwg` or WY from that run; inspect wrapper/autograd parity first.
+- If `ascendc` and `manual_ascendc` both fail, and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
+- If `ascendc` and `manual_ascendc` both fail, and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
 - If only `triton_both` or `triton_all` passes, the error is split across multiple backward branches.
 - If no Triton replacement passes, check earlier forward/backward intermediates (`h`, `v_new`, `A`) or a layout mismatch in the diagnostic.
 
@@ -273,6 +275,8 @@ Only treat a replacement as usable if the full gated summary says:
 
 - `controls_ok=True`: the replacement preserves known-good cases.
 - `target_grad_k_ok=True`: the replacement fixes the failing partial-tail case.
+
+The suite also prints `diagnostic gate`. If it says `wrapper fails but manual internal chain passes`, ignore `replacement validity`: the hand-reconstructed chain is missing some real wrapper behavior, so late-op replacement conclusions are not valid yet.
 
 `triton_full` is the baseline for "pure Triton is good on this shape"; `triton_dqkwg`, `triton_wy`, and `triton_both` are candidate operator replacements. Do not use `triton_dhu` conclusions unless the explicit `bwd_dhu` hybrid first proves it can compile and pass the control cases.
 

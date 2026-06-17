@@ -36,6 +36,7 @@ import compare_gdn_precision as cmp
 # Tuple layout: replace_dhu, replace_dqkwg, replace_wy.
 VARIANTS: dict[str, tuple[bool, bool, bool]] = {
     "ascendc": (False, False, False),
+    "manual_ascendc": (False, False, False),
     "triton_full": (False, False, False),
     "triton_dqkwg": (False, True, False),
     "triton_wy": (False, False, True),
@@ -447,6 +448,36 @@ def run_full_triton_variant(case: cmp.Case, args: argparse.Namespace, full_trito
     }
 
 
+def run_wrapper_ascendc_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    torch = cmp.torch
+    q, k, v, beta, g, cu = inputs
+    q_ac, k_ac, v_ac = [cmp.clone_leaf(x.transpose(1, 2).contiguous()) for x in (q, k, v)]
+    beta_ac, g_ac = [cmp.clone_leaf(x) for x in (beta, g)]
+    use_qk_l2norm = not args.no_qk_l2norm
+
+    o_ac, _ = flash_module.flash_gated_delta_rule(
+        q=q_ac,
+        k=k_ac,
+        v=v_ac,
+        g=g_ac,
+        beta=beta_ac,
+        cu_seqlens=cu,
+        chunk_size=case.chunk_size,
+        use_qk_l2norm_in_kernel=use_qk_l2norm,
+    )
+    o_ac.backward(do)
+    torch.npu.synchronize()
+    return {
+        "output": o_ac,
+        "grad_q": q_ac.grad.transpose(1, 2).contiguous(),
+        "grad_k": k_ac.grad.transpose(1, 2).contiguous(),
+        "grad_v": v_ac.grad.transpose(1, 2).contiguous(),
+        "grad_beta": beta_ac.grad,
+        "grad_g": g_ac.grad,
+        "components": {},
+    }
+
+
 def run_variant(
     name: str,
     case: cmp.Case,
@@ -773,7 +804,14 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
     if "comparisons" not in variant_results["ascendc"]:
         return "ascendc variant did not complete; cannot infer a culprit."
     if grad_k_allclose(variant_results, "ascendc"):
-        return "ascendc grad_k already passes; no failing branch in this case."
+        return "wrapper ascendc grad_k already passes; no failing branch in this case."
+
+    if grad_k_allclose(variant_results, "manual_ascendc"):
+        return (
+            "Real wrapper AscendC fails, but the hand-reconstructed internal AscendC chain passes. "
+            "Do not blame dqkwg/WY from this run; first inspect wrapper/autograd parity, saved tensors, "
+            "metadata conversion, layout, and l2norm handling."
+        )
 
     full_triton_ok = grad_k_allclose(variant_results, "triton_full")
     if full_triton_ok:
@@ -858,7 +896,9 @@ def main() -> int:
         for name in names:
             print(f"==> {name}", flush=True)
             try:
-                if name == "triton_full":
+                if name == "ascendc":
+                    raw = run_wrapper_ascendc_variant(case, args, flash_module, inputs, do)
+                elif name == "triton_full":
                     raw = run_full_triton_variant(case, args, full_triton_gdn, inputs, do)
                 else:
                     raw = run_variant(
@@ -877,7 +917,7 @@ def main() -> int:
             except Exception as exc:  # pylint: disable=broad-except
                 error_text = compact_error(exc)
                 variant_results[name] = {
-                    "kind": "full_triton" if name == "triton_full" else "hybrid_or_ascendc",
+                    "kind": "wrapper_ascendc" if name == "ascendc" else ("full_triton" if name == "triton_full" else "hybrid_or_manual_ascendc"),
                     "replace_dhu": VARIANTS[name][0],
                     "replace_dqkwg": VARIANTS[name][1],
                     "replace_wy": VARIANTS[name][2],
@@ -890,7 +930,7 @@ def main() -> int:
 
             raw_results[name] = raw
             variant_results[name] = {
-                "kind": "full_triton" if name == "triton_full" else "hybrid_or_ascendc",
+                "kind": "wrapper_ascendc" if name == "ascendc" else ("full_triton" if name == "triton_full" else "hybrid_or_manual_ascendc"),
                 "replace_dhu": VARIANTS[name][0],
                 "replace_dqkwg": VARIANTS[name][1],
                 "replace_wy": VARIANTS[name][2],
@@ -917,9 +957,9 @@ def main() -> int:
             print_tail_top_errors(only_name, variant_results[only_name].get("tail_reports", {}))
 
         component_deltas = {}
-        if "ascendc" in raw_results and "triton_both" in raw_results:
-            component_deltas["ascendc_vs_triton_both"] = component_delta(
-                raw_results["ascendc"], raw_results["triton_both"], inputs[-1], args
+        if "manual_ascendc" in raw_results and "triton_both" in raw_results:
+            component_deltas["manual_ascendc_vs_triton_both"] = component_delta(
+                raw_results["manual_ascendc"], raw_results["triton_both"], inputs[-1], args
             )
 
         conclusion = infer_culprit(variant_results)
@@ -956,8 +996,9 @@ def main() -> int:
                 f"failed={','.join(result['failed_tensors']) or '-'}"
             )
         if component_deltas:
-            print("\ncomponent deltas: ascendc vs triton_both")
-            for name, stats in component_deltas["ascendc_vs_triton_both"].items():
+            print("\ncomponent deltas: manual_ascendc vs triton_both")
+            first_delta = next(iter(component_deltas.values()))
+            for name, stats in first_delta.items():
                 print(
                     f"{name:14s} max_abs={stats['max_abs']:.6g} "
                     f"rms={stats['rms']:.6g} mismatch={stats['mismatch_ratio']:.6g}"

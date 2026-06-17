@@ -103,7 +103,7 @@ for name, path in case_files.items():
         cases[name] = json.loads(path.read_text())
 
 if variant_env == "all":
-    variants = ["ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both"]
+    variants = ["ascendc", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both"]
 else:
     variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]
@@ -152,9 +152,20 @@ for case_name in case_files:
         )
 
 print()
+print("diagnostic gate")
+asc_target = variant_result(target, "ascendc")
+manual_target = variant_result(target, "manual_ascendc")
+if asc_target is not None or manual_target is not None:
+    asc_ok = ok(asc_target)
+    manual_ok = ok(manual_target)
+    print(f"target_wrapper_grad_k_ok={asc_ok} target_manual_chain_grad_k_ok={manual_ok}")
+    if not asc_ok and manual_ok:
+        print("wrapper fails but manual internal chain passes; ignore replacement validity until wrapper/manual parity is resolved")
+
+print()
 print("replacement validity")
 for variant in variants:
-    if variant == "ascendc":
+    if variant in ("ascendc", "manual_ascendc"):
         continue
     if not all(case in cases for case in controls):
         print(
