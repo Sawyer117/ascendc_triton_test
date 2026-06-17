@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--creative-repo",
         default=os.environ.get("CREATIVE_REPO"),
-        help="Path to the creative checkout when --impl creative is used.",
+        help="Optional creative checkout for --impl creative. Defaults to the vendored creative_snapshot.",
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int, help="Override batch size.")
@@ -184,7 +184,16 @@ def find_creative_repo(path_arg: str | None) -> Path | None:
     if path_arg:
         candidates.append(Path(path_arg))
     cwd = Path.cwd()
-    candidates.extend([cwd, cwd.parent / "qwen3.5_omni_creative", cwd.parent / "MindSpeed-MM"])
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend(
+        [
+            script_dir / "creative_snapshot",
+            cwd / "creative_snapshot",
+            cwd,
+            cwd.parent / "qwen3.5_omni_creative",
+            cwd.parent / "MindSpeed-MM",
+        ]
+    )
     for candidate in candidates:
         if (candidate / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5" / "flash_gated_delta_rule.py").is_file():
             return candidate.resolve()
@@ -257,7 +266,10 @@ def load_creative_gdn(creative_repo_arg: str | None):
 
     creative_repo = find_creative_repo(creative_repo_arg)
     if creative_repo is None:
-        raise RuntimeError("Cannot find creative implementation. Pass --creative-repo /path/to/qwen3.5_omni_creative.")
+        raise RuntimeError(
+            "Cannot find creative implementation. Keep creative_snapshot in this test repo, "
+            "or pass --creative-repo /path/to/qwen3.5_omni_creative."
+        )
     package = _install_creative_package(creative_repo)
     module_name = f"{package}.flash_gated_delta_rule"
     module_path = creative_repo / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5" / "flash_gated_delta_rule.py"

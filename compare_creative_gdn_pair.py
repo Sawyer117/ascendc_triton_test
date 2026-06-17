@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--creative-repo",
         default=os.environ.get("CREATIVE_REPO"),
-        help="Path to qwen3.5_omni_creative checkout.",
+        help="Optional path to qwen3.5_omni_creative checkout. Defaults to the vendored creative_snapshot.",
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int, help="Override batch size.")
@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
         "--no-mindspeed-triton-shim",
         action="store_true",
         help=(
-            "Do not shim mindspeed.lite.ops.triton imports to creative's local "
-            "qwen3_5/triton modules when the external mindspeed package is missing."
+            "Do not shim mindspeed.lite.ops.triton imports to the selected "
+            "snapshot/repo qwen3_5/triton modules when the external mindspeed package is missing."
         ),
     )
     return parser.parse_args()
@@ -69,13 +69,23 @@ def find_creative_repo(path_arg: str | None) -> Path:
     if path_arg:
         candidates.append(Path(path_arg))
     cwd = Path.cwd()
-    candidates.extend([cwd, cwd.parent / "qwen3.5_omni_creative", cwd.parent / "MindSpeed-MM"])
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend(
+        [
+            script_dir / "creative_snapshot",
+            cwd / "creative_snapshot",
+            cwd,
+            cwd.parent / "qwen3.5_omni_creative",
+            cwd.parent / "MindSpeed-MM",
+        ]
+    )
     for candidate in candidates:
         marker = candidate / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5" / "flash_gated_delta_rule.py"
         if marker.is_file():
             return candidate.resolve()
     raise RuntimeError(
-        "Cannot find creative repo. Pass --creative-repo /path/to/qwen3.5_omni_creative."
+        "Cannot find creative snapshot or repo. Keep creative_snapshot in this test repo, "
+        "or pass --creative-repo /path/to/qwen3.5_omni_creative."
     )
 
 

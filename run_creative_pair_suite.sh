@@ -2,7 +2,8 @@
 set -u
 
 PYTHON=${PYTHON:-python}
-CREATIVE_REPO=${CREATIVE_REPO:-../qwen3.5_omni_creative}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CREATIVE_REPO=${CREATIVE_REPO:-${SCRIPT_DIR}/creative_snapshot}
 DEVICE=${DEVICE:-0}
 DTYPE=${DTYPE:-bf16}
 OUT_DIR=${OUT_DIR:-./creative_pair_results}
@@ -15,7 +16,7 @@ run_case() {
   local json="${OUT_DIR}/${name}.json"
   local log="${OUT_DIR}/${name}.log"
   local cmd=(
-    "${PYTHON}" compare_creative_gdn_pair.py
+    "${PYTHON}" "${SCRIPT_DIR}/compare_creative_gdn_pair.py"
     --creative-repo "${CREATIVE_REPO}"
     --device "${DEVICE}"
     --dtype "${DTYPE}"

@@ -12,7 +12,7 @@ The AscendC-mixed paths still need the FLA-npu custom op package installed, beca
 
 ## Creative Pair Test
 
-For the original creative-code question, use `compare_creative_gdn_pair.py` or `run_creative_pair_suite.sh` first. This compares the two real implementations inside the creative repo:
+For the original creative-code question, use `compare_creative_gdn_pair.py` or `run_creative_pair_suite.sh` first. This compares a vendored snapshot of the two creative implementations:
 
 - Pure Triton baseline: `mindspeed_mm/fsdp/models/qwen3_5/chunk_gated_delta_rule.py`
 - AscendC mixed path: `mindspeed_mm/fsdp/models/qwen3_5/flash_gated_delta_rule.py`
@@ -24,6 +24,12 @@ Run from the test repo root:
 ```bash
 cd /home/canada_group_account/a00652497/bytedance/ascendc_triton_test
 export LD_LIBRARY_PATH=/home/canada_group_account/CANN/9.0.0.0430/cann-9.0.0/opp/vendors/fla_npu_transformer/op_api/lib/:${LD_LIBRARY_PATH}
+bash run_creative_pair_suite.sh
+```
+
+By default this uses `./creative_snapshot`, so no separate creative checkout is required. To validate a newer creative branch instead of the vendored snapshot, override it explicitly:
+
+```bash
 CREATIVE_REPO=/path/to/qwen3.5_omni_creative bash run_creative_pair_suite.sh
 ```
 
@@ -33,7 +39,6 @@ Run one focused case:
 
 ```bash
 python compare_creative_gdn_pair.py \
-  --creative-repo /path/to/qwen3.5_omni_creative \
   --case varlen \
   --cu-seqlens 0,1121 \
   --heads 8 \
@@ -44,7 +49,9 @@ python compare_creative_gdn_pair.py \
   --output-json ./creative_pair_results/varlen_single_1121.json
 ```
 
-If the creative mixed path imports `mindspeed.lite.ops.triton.*` but that external `mindspeed` package is absent, the script shims those helper imports to creative's local `mindspeed_mm/fsdp/models/qwen3_5/triton/*` modules and records `mindspeed_triton_shim_used=true` in JSON. Use `--no-mindspeed-triton-shim` to require the exact external import path.
+The focused command also defaults to `./creative_snapshot`. Pass `--creative-repo /path/to/qwen3.5_omni_creative` only when you intentionally want to test an external checkout.
+
+If the creative mixed path imports `mindspeed.lite.ops.triton.*` but that external `mindspeed` package is absent, the script shims those helper imports to the snapshot's local `mindspeed_mm/fsdp/models/qwen3_5/triton/*` modules and records `mindspeed_triton_shim_used=true` in JSON. Use `--no-mindspeed-triton-shim` to require the exact external import path.
 
 Interpretation:
 
