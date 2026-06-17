@@ -9,6 +9,7 @@ with an in-file torch reference on identical inputs.
 from __future__ import annotations
 
 import argparse
+import importlib
 import importlib.util
 import json
 import os
@@ -69,10 +70,16 @@ def parse_args() -> argparse.Namespace:
         description="Compare FLA-npu AscendC GDN with a pure PyTorch reference."
     )
     parser.add_argument("--case", choices=[*CASES.keys(), "all"], default="small")
+    parser.add_argument("--impl", choices=["fla", "creative"], default=os.environ.get("GDN_IMPL", "fla"))
     parser.add_argument(
         "--fla-repo",
         default=os.environ.get("FLA_NPU_REPO"),
         help="Path to flash-linear-attention-npu. Defaults to ./flash-linear-attention-npu if present.",
+    )
+    parser.add_argument(
+        "--creative-repo",
+        default=os.environ.get("CREATIVE_REPO"),
+        help="Path to the creative/MindSpeed-MM repo when --impl creative is used.",
     )
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int, help="Override batch size.")
@@ -128,9 +135,7 @@ def find_fla_repo(path_arg: str | None) -> Path:
     )
 
 
-def load_flash_gdn(fla_repo: Path):
-    import_torch_runtime()
-
+def check_npu_runtime():
     try:
         import torch_npu  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
     except ImportError as exc:
@@ -156,6 +161,11 @@ def load_flash_gdn(fla_repo: Path):
             + ". Reinstall the FLA-npu .run package and torch_custom/fla_npu wheel in the same environment."
         )
 
+
+def load_flash_gdn(fla_repo: Path):
+    import_torch_runtime()
+    check_npu_runtime()
+
     if str(fla_repo) not in sys.path:
         sys.path.insert(0, str(fla_repo))
 
@@ -166,6 +176,36 @@ def load_flash_gdn(fla_repo: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.flash_gated_delta_rule
+
+
+def find_creative_repo(path_arg: str | None) -> Path | None:
+    candidates = []
+    if path_arg:
+        candidates.append(Path(path_arg))
+    cwd = Path.cwd()
+    candidates.extend([cwd, cwd.parent / "qwen3.5_omni_creative", cwd.parent / "MindSpeed-MM"])
+    for candidate in candidates:
+        if (candidate / "mindspeed_mm" / "fsdp" / "models" / "qwen3_5" / "flash_gated_delta_rule.py").is_file():
+            return candidate.resolve()
+    return None
+
+
+def load_creative_gdn(creative_repo_arg: str | None):
+    import_torch_runtime()
+    check_npu_runtime()
+
+    creative_repo = find_creative_repo(creative_repo_arg)
+    if creative_repo is not None and str(creative_repo) not in sys.path:
+        sys.path.insert(0, str(creative_repo))
+
+    try:
+        module = importlib.import_module("mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule")
+    except ImportError as exc:
+        raise RuntimeError(
+            "Cannot import creative implementation. Run from the creative repo or pass "
+            "--creative-repo /path/to/qwen3.5_omni_creative with its Python dependencies installed."
+        ) from exc
+    return module.flash_gated_delta_rule, creative_repo
 
 
 def parse_cu_seqlens(value: str | None) -> tuple[int, ...] | None:
@@ -381,7 +421,10 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
 
     q, k, v, beta, g, cu = make_inputs(case, device, dtype, args.seed)
     q_ref, k_ref, v_ref, beta_ref, g_ref = [clone_leaf(x) for x in (q, k, v, beta, g)]
-    q_ac, k_ac, v_ac = [clone_leaf(x.transpose(1, 2).contiguous()) for x in (q, k, v)]
+    if args.impl == "fla":
+        q_ac, k_ac, v_ac = [clone_leaf(x.transpose(1, 2).contiguous()) for x in (q, k, v)]
+    else:
+        q_ac, k_ac, v_ac = [clone_leaf(x) for x in (q, k, v)]
     beta_ac, g_ac = [clone_leaf(x) for x in (beta, g)]
     use_qk_l2norm = not args.no_qk_l2norm
 
@@ -426,10 +469,15 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
     o_ref.backward(do_ref)
     torch.npu.synchronize()
 
+    if args.impl == "fla":
+        q_ac_grad, k_ac_grad, v_ac_grad = [x.grad.transpose(1, 2).contiguous() for x in (q_ac, k_ac, v_ac)]
+    else:
+        q_ac_grad, k_ac_grad, v_ac_grad = [x.grad for x in (q_ac, k_ac, v_ac)]
+
     if cu is not None:
         valid_mask = varlen_valid_mask(cu, device)
         o_ac_cmp = varlen_to_nonvarlen(cu, o_ac)
-        q_ac_g, k_ac_g, v_ac_g = [varlen_to_nonvarlen(cu, x.grad.transpose(1, 2).contiguous()) for x in (q_ac, k_ac, v_ac)]
+        q_ac_g, k_ac_g, v_ac_g = [varlen_to_nonvarlen(cu, x) for x in (q_ac_grad, k_ac_grad, v_ac_grad)]
         beta_ac_g, g_ac_g = varlen_to_nonvarlen(cu, beta_ac.grad, g_ac.grad)
         q_ref_g, k_ref_g, v_ref_g, beta_ref_g, g_ref_g = (
             q_ref_in.grad,
@@ -441,7 +489,7 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
     else:
         valid_mask = None
         o_ac_cmp = o_ac
-        q_ac_g, k_ac_g, v_ac_g = [x.grad.transpose(1, 2).contiguous() for x in (q_ac, k_ac, v_ac)]
+        q_ac_g, k_ac_g, v_ac_g = q_ac_grad, k_ac_grad, v_ac_grad
         beta_ac_g, g_ac_g = beta_ac.grad, g_ac.grad
         q_ref_g, k_ref_g, v_ref_g, beta_ref_g, g_ref_g = q_ref.grad, k_ref.grad, v_ref.grad, beta_ref.grad, g_ref.grad
 
@@ -455,6 +503,7 @@ def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, o
     }
     return {
         "case": case.__dict__,
+        "impl": args.impl,
         "dtype": args.dtype,
         "device": str(device),
         "seed": args.seed,
@@ -470,15 +519,22 @@ def main() -> int:
     args = parse_args()
     try:
         import_torch_runtime()
-        fla_repo = find_fla_repo(args.fla_repo)
-        flash_gdn = load_flash_gdn(fla_repo)
+        creative_repo = None
+        fla_repo = None
+        if args.impl == "fla":
+            fla_repo = find_fla_repo(args.fla_repo)
+            flash_gdn = load_flash_gdn(fla_repo)
+        else:
+            flash_gdn, creative_repo = load_creative_gdn(args.creative_repo)
         results = [run_one_case(case, args, flash_gdn) for case in selected_cases(args)]
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
 
     payload = {
-        "fla_repo": str(find_fla_repo(args.fla_repo)),
+        "impl": args.impl,
+        "fla_repo": str(fla_repo) if fla_repo is not None else None,
+        "creative_repo": str(creative_repo) if creative_repo is not None else None,
         "torch": torch.__version__,
         "cases": results,
         "passed": all(case["passed"] for case in results),

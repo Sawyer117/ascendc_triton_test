@@ -191,6 +191,14 @@ Run a larger optional pass only after the default suite is understood:
 RUN_LARGE=1 bash run_precision_suite.sh
 ```
 
+To test the creative/MindSpeed-MM wrapper instead of the FLA-npu standalone example, run the same suite with `IMPL=creative` and point `CREATIVE_REPO` at that checkout:
+
+```bash
+IMPL=creative CREATIVE_REPO=/path/to/qwen3.5_omni_creative bash run_precision_suite.sh
+```
+
+The two implementations use the same GDN math structure, but they are not byte-for-byte identical: the default `fla` mode imports `flash-linear-attention-npu/examples/flash_gated_delta_rule.py`, while `creative` imports `mindspeed_mm.fsdp.models.qwen3_5.flash_gated_delta_rule`.
+
 ## Run Individual Cases
 
 Run one packed varlen case:

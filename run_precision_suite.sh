@@ -3,6 +3,8 @@ set -u
 
 PYTHON=${PYTHON:-python}
 FLA_REPO=${FLA_REPO:-./flash-linear-attention-npu}
+CREATIVE_REPO=${CREATIVE_REPO:-}
+IMPL=${IMPL:-fla}
 DEVICE=${DEVICE:-0}
 DTYPE=${DTYPE:-bf16}
 OUT_DIR=${OUT_DIR:-./precision_results}
@@ -14,7 +16,11 @@ printf 'case\trc\tjson\tlog\n' >> "${SUMMARY_TSV}"
 
 echo "precision suite"
 echo "  python:   ${PYTHON}"
+echo "  impl:     ${IMPL}"
 echo "  fla_repo: ${FLA_REPO}"
+if [[ -n "${CREATIVE_REPO}" ]]; then
+  echo "  creative: ${CREATIVE_REPO}"
+fi
 echo "  device:   ${DEVICE}"
 echo "  dtype:    ${DTYPE}"
 echo "  out_dir:  ${OUT_DIR}"
@@ -27,9 +33,13 @@ run_case() {
   local log="${OUT_DIR}/${name}.log"
 
   echo "==> ${name}"
-  echo "    ${PYTHON} compare_gdn_precision.py --fla-repo ${FLA_REPO} --device ${DEVICE} --dtype ${DTYPE} --output-json ${json} $*"
+  local extra_args=(--impl "${IMPL}" --fla-repo "${FLA_REPO}")
+  if [[ -n "${CREATIVE_REPO}" ]]; then
+    extra_args+=(--creative-repo "${CREATIVE_REPO}")
+  fi
+  echo "    ${PYTHON} compare_gdn_precision.py ${extra_args[*]} --device ${DEVICE} --dtype ${DTYPE} --output-json ${json} $*"
   "${PYTHON}" compare_gdn_precision.py \
-    --fla-repo "${FLA_REPO}" \
+    "${extra_args[@]}" \
     --device "${DEVICE}" \
     --dtype "${DTYPE}" \
     --output-json "${json}" \
