@@ -9,6 +9,7 @@ This diagnostic reuses the same inputs and PyTorch reference as
 compare_gdn_precision.py, then runs targeted backward variants:
 
     ascendc:       original FLA-npu AscendC chain
+    ascendc_saved_x: same wrapper, but l2norm_bwd receives original q/k
     triton_dhu:    replace only npu_chunk_gated_delta_rule_bwd_dhu
     triton_dqkwg:  replace only npu_chunk_bwd_dqkwg
     triton_wy:     replace only npu_prepare_wy_repr_bwd_da/full
@@ -36,6 +37,7 @@ import compare_gdn_precision as cmp
 # Tuple layout: replace_dv_local, replace_dhu, replace_dqkwg, replace_wy.
 VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
     "ascendc": (False, False, False, False),
+    "ascendc_saved_x": (False, False, False, False),
     "manual_ascendc": (False, False, False, False),
     "triton_full": (False, False, False, False),
     "triton_dqkwg": (False, False, True, False),
@@ -508,6 +510,142 @@ def run_wrapper_ascendc_variant(case: cmp.Case, args: argparse.Namespace, flash_
     }
 
 
+def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    """Run the real AscendC wrapper path with original q/k saved for l2norm_bwd."""
+    torch = cmp.torch
+    q, k, v, beta, g, cu = inputs
+    q_ac, k_ac, v_ac = [cmp.clone_leaf(x.transpose(1, 2).contiguous()) for x in (q, k, v)]
+    beta_ac, g_ac = [cmp.clone_leaf(x) for x in (beta, g)]
+    use_qk_l2norm = not args.no_qk_l2norm
+
+    class SavedXL2NormFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(
+            ctx,
+            q_in,
+            k_in,
+            v_in,
+            g_in,
+            beta_in,
+            scale,
+            initial_state,
+            output_final_state,
+            cu_seqlens,
+            cu_seqlens_list,
+            chunk_indices,
+            chunk_indices_list,
+            use_l2norm,
+            chunk_size,
+        ):
+            q_orig = q_in
+            k_orig = k_in
+            if use_l2norm:
+                q_work, q_rstd = flash_module.l2norm_fwd(q_in)
+                k_work, k_rstd = flash_module.l2norm_fwd(k_in)
+            else:
+                q_work, k_work = q_in, k_in
+                q_rstd = q_in.new_empty(0)
+                k_rstd = k_in.new_empty(0)
+
+            g_out, o, A, final_state = flash_module.flash_chunk_gated_delta_rule_fwd(
+                q=q_work,
+                k=k_work,
+                v=v_in,
+                g=g_in,
+                beta=beta_in,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_list=cu_seqlens_list,
+                chunk_indices=chunk_indices,
+                chunk_indices_list=chunk_indices_list,
+                chunk_size=chunk_size,
+            )
+            ctx.save_for_backward(q_orig, k_orig, q_work, k_work, q_rstd, k_rstd, v_in, g_out, beta_in, A)
+            ctx.scale = scale
+            ctx.initial_state = initial_state
+            ctx.cu_seqlens = cu_seqlens
+            ctx.cu_seqlens_list = cu_seqlens_list
+            ctx.chunk_indices = chunk_indices
+            ctx.chunk_indices_list = chunk_indices_list
+            ctx.use_l2norm = use_l2norm
+            ctx.chunk_size = chunk_size
+            return o.to(q_in.dtype), final_state
+
+        @staticmethod
+        def backward(ctx, do_grad, dht):
+            q_orig, k_orig, q_work, k_work, q_rstd, k_rstd, v_in, g_out, beta_in, A = ctx.saved_tensors
+            dq, dk, dv, db, dg, dh0 = flash_module.flash_chunk_gated_delta_rule_bwd(
+                q=q_work,
+                k=k_work,
+                v=v_in,
+                g=g_out,
+                beta=beta_in,
+                A=A,
+                scale=ctx.scale,
+                initial_state=ctx.initial_state,
+                do=do_grad,
+                dht=dht,
+                cu_seqlens=ctx.cu_seqlens,
+                cu_seqlens_list=ctx.cu_seqlens_list,
+                chunk_indices=ctx.chunk_indices,
+                chunk_indices_list=ctx.chunk_indices_list,
+                chunk_size=ctx.chunk_size,
+            )
+            if ctx.use_l2norm:
+                dq = flash_module.l2norm_bwd(q_orig, q_rstd, dq)
+                dk = flash_module.l2norm_bwd(k_orig, k_rstd, dk)
+            return (
+                dq.to(q_orig),
+                dk.to(k_orig),
+                dv.to(v_in),
+                dg.to(g_out),
+                db.to(beta_in),
+                None,
+                dh0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+    cu_meta, cu_list, chunk_indices, chunk_indices_list = ensure_metadata(
+        flash_module, g_ac, cu, case.chunk_size
+    )
+    scale = case.key_dim ** -0.5
+    o_ac, _ = SavedXL2NormFunction.apply(
+        q_ac,
+        k_ac,
+        v_ac,
+        g_ac,
+        beta_ac,
+        float(scale),
+        None,
+        False,
+        cu_meta,
+        cu_list,
+        chunk_indices,
+        chunk_indices_list,
+        use_qk_l2norm,
+        case.chunk_size,
+    )
+    o_ac.backward(do)
+    torch.npu.synchronize()
+    return {
+        "output": o_ac,
+        "grad_q": q_ac.grad.transpose(1, 2).contiguous(),
+        "grad_k": k_ac.grad.transpose(1, 2).contiguous(),
+        "grad_v": v_ac.grad.transpose(1, 2).contiguous(),
+        "grad_beta": beta_ac.grad,
+        "grad_g": g_ac.grad,
+        "components": {},
+    }
+
+
 def run_variant(
     name: str,
     case: cmp.Case,
@@ -857,6 +995,9 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
             "metadata conversion, layout, and l2norm handling."
         )
 
+    if grad_k_allclose(variant_results, "ascendc_saved_x"):
+        return "Saving original q/k for l2norm_bwd fixes grad_k; culprit is q/k l2norm backward saved-input contract, not a GDN sub-operator."
+
     full_triton_ok = grad_k_allclose(variant_results, "triton_full")
     if full_triton_ok:
         full_prefix = "Full Triton baseline passes on this shape; AscendC-specific issue confirmed. "
@@ -948,6 +1089,8 @@ def main() -> int:
             try:
                 if name == "ascendc":
                     raw = run_wrapper_ascendc_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_saved_x":
+                    raw = run_wrapper_ascendc_saved_x_variant(case, args, flash_module, inputs, do)
                 elif name == "triton_full":
                     raw = run_full_triton_variant(case, args, full_triton_gdn, inputs, do)
                 else:
