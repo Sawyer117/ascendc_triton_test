@@ -36,6 +36,7 @@ import compare_gdn_precision as cmp
 # Tuple layout: replace_dhu, replace_dqkwg, replace_wy.
 VARIANTS: dict[str, tuple[bool, bool, bool]] = {
     "ascendc": (False, False, False),
+    "triton_full": (False, False, False),
     "triton_dqkwg": (False, True, False),
     "triton_wy": (False, False, True),
     "triton_both": (False, True, True),
@@ -107,6 +108,15 @@ def load_flash_module(fla_repo: Path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_full_triton_gdn():
+    repo_root = Path(__file__).resolve().parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    module = importlib.import_module("local_triton_gdn")
+    return module.chunk_gated_delta_rule
 
 
 def load_local_triton():
@@ -405,6 +415,35 @@ def run_backward_components(
         "dg": dg,
         "dk_from_dqkwg": dk_from_dqkwg,
         "dk_from_wy": dk_from_wy,
+    }
+
+
+def run_full_triton_variant(case: cmp.Case, args: argparse.Namespace, full_triton_gdn, inputs: tuple[Any, ...], do):
+    torch = cmp.torch
+    q, k, v, beta, g, cu = inputs
+    q_tri, k_tri, v_tri, beta_tri, g_tri = [cmp.clone_leaf(x) for x in (q, k, v, beta, g)]
+    use_qk_l2norm = not args.no_qk_l2norm
+
+    o_tri, _ = full_triton_gdn(
+        q=q_tri,
+        k=k_tri,
+        v=v_tri,
+        g=g_tri,
+        beta=beta_tri,
+        cu_seqlens=cu,
+        chunk_size=case.chunk_size,
+        use_qk_l2norm_in_kernel=use_qk_l2norm,
+    )
+    o_tri.backward(do)
+    torch.npu.synchronize()
+    return {
+        "output": o_tri,
+        "grad_q": q_tri.grad,
+        "grad_k": k_tri.grad,
+        "grad_v": v_tri.grad,
+        "grad_beta": beta_tri.grad,
+        "grad_g": g_tri.grad,
+        "components": {},
     }
 
 
@@ -736,24 +775,32 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
     if grad_k_allclose(variant_results, "ascendc"):
         return "ascendc grad_k already passes; no failing branch in this case."
 
+    full_triton_ok = grad_k_allclose(variant_results, "triton_full")
+    if full_triton_ok:
+        full_prefix = "Full Triton baseline passes on this shape; AscendC-specific issue confirmed. "
+    elif "triton_full" in variant_results:
+        full_prefix = "Full Triton baseline did not pass or did not complete; do not use Triton as a replacement yet. "
+    else:
+        full_prefix = ""
+
     dhu_ok = grad_k_allclose(variant_results, "triton_dhu")
     dqkwg_ok = grad_k_allclose(variant_results, "triton_dqkwg")
     wy_ok = grad_k_allclose(variant_results, "triton_wy")
     late_both_ok = grad_k_allclose(variant_results, "triton_both")
     all_ok = grad_k_allclose(variant_results, "triton_all")
     if dhu_ok:
-        return "Most likely culprit: npu_chunk_gated_delta_rule_bwd_dhu."
+        return full_prefix + "Most likely culprit: npu_chunk_gated_delta_rule_bwd_dhu."
     if dqkwg_ok and not wy_ok:
-        return "Most likely culprit: npu_chunk_bwd_dqkwg."
+        return full_prefix + "Most likely culprit: npu_chunk_bwd_dqkwg."
     if wy_ok and not dqkwg_ok:
-        return "Most likely culprit: npu_prepare_wy_repr_bwd_da/full."
+        return full_prefix + "Most likely culprit: npu_prepare_wy_repr_bwd_da/full."
     if dqkwg_ok and wy_ok:
-        return "Both late-branch replacements make grad_k pass; inspect component deltas."
+        return full_prefix + "Both late-branch replacements make grad_k pass; inspect component deltas."
     if late_both_ok:
-        return "Only replacing dqkwg+WY makes grad_k pass; error is split across late branches."
+        return full_prefix + "Only replacing dqkwg+WY makes grad_k pass; error is split across late branches."
     if all_ok:
-        return "Only replacing dhu+dqkwg+WY makes grad_k pass; dhu and a later branch both contribute or Triton layouts differ."
-    return "No Triton replacement fixed grad_k; check fwd_h/v_new/A or Triton layout compatibility."
+        return full_prefix + "Only replacing dhu+dqkwg+WY makes grad_k pass; dhu and a later branch both contribute or Triton layouts differ."
+    return full_prefix + "No validated Triton replacement fixed grad_k; check controls before blaming a single op."
 
 
 def segment_summary(cu_seqlens: tuple[int, ...] | None, total_tokens: int, chunk_size: int):
@@ -782,6 +829,7 @@ def main() -> int:
         if hasattr(torch.npu, "set_compile_mode"):
             torch.npu.set_compile_mode(jit_compile=False)
 
+        full_triton_gdn = load_full_triton_gdn()
         triton_dhu, triton_dqkwg, triton_wy = load_local_triton()
         case = cmp.override_case(cmp.CASES[args.case], args)
         dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -810,22 +858,26 @@ def main() -> int:
         for name in names:
             print(f"==> {name}", flush=True)
             try:
-                raw = run_variant(
-                    name,
-                    case,
-                    args,
-                    flash_module,
-                    triton_dhu,
-                    triton_dqkwg,
-                    triton_wy,
-                    inputs,
-                    do,
-                )
+                if name == "triton_full":
+                    raw = run_full_triton_variant(case, args, full_triton_gdn, inputs, do)
+                else:
+                    raw = run_variant(
+                        name,
+                        case,
+                        args,
+                        flash_module,
+                        triton_dhu,
+                        triton_dqkwg,
+                        triton_wy,
+                        inputs,
+                        do,
+                    )
                 comparisons = compare_outputs(raw, reference, inputs[-1], args)
                 tails = tail_reports(raw, reference, case, inputs[-1], args)
             except Exception as exc:  # pylint: disable=broad-except
                 error_text = compact_error(exc)
                 variant_results[name] = {
+                    "kind": "full_triton" if name == "triton_full" else "hybrid_or_ascendc",
                     "replace_dhu": VARIANTS[name][0],
                     "replace_dqkwg": VARIANTS[name][1],
                     "replace_wy": VARIANTS[name][2],
@@ -838,6 +890,7 @@ def main() -> int:
 
             raw_results[name] = raw
             variant_results[name] = {
+                "kind": "full_triton" if name == "triton_full" else "hybrid_or_ascendc",
                 "replace_dhu": VARIANTS[name][0],
                 "replace_dqkwg": VARIANTS[name][1],
                 "replace_wy": VARIANTS[name][2],

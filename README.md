@@ -230,6 +230,7 @@ The diagnostic also writes the same tail reports into JSON under each variant's 
 The diagnostic runs these variants:
 
 - `ascendc`: original full AscendC backward.
+- `triton_full`: complete local Triton GDN forward/backward. This is the Triton baseline; it does not mix AscendC intermediates.
 - `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
 - `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
 - `triton_both`: replace `dqkwg` and WY backward, but keep `bwd_dhu` as AscendC.
@@ -244,6 +245,19 @@ Read the result as follows:
 - If no Triton replacement passes, check earlier forward/backward intermediates (`h`, `v_new`, `A`) or a layout mismatch in the diagnostic.
 
 The script also prints component deltas for `dk_from_dqkwg` and `dk_from_wy`, so the final verdict is not based only on one full-gradient pass/fail.
+
+To avoid trusting an invalid hybrid replacement, run the gated bisect suite:
+
+```bash
+bash run_gradk_bisect_suite.sh
+```
+
+It runs the same variants over three control cases (`fixed_1k_h8`, `varlen_single_1024`, `varlen_aligned_1024`) and the failing target (`target_single_1121`). Only treat a replacement as usable if the final summary says:
+
+- `controls_ok=True`: the replacement preserves known-good cases.
+- `target_grad_k_ok=True`: the replacement fixes the failing partial-tail case.
+
+`triton_full` is the baseline for "pure Triton is good on this shape"; `triton_dqkwg`, `triton_wy`, and `triton_both` are candidate operator replacements. Do not use `triton_dhu` conclusions unless the explicit `bwd_dhu` hybrid first proves it can compile and pass the control cases.
 
 To test the creative/MindSpeed-MM wrapper instead of the FLA-npu standalone example, run the same suite with `IMPL=creative` and point `CREATIVE_REPO` at that checkout:
 
