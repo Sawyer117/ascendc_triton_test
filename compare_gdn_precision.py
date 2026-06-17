@@ -35,7 +35,9 @@ class Case:
 
 
 CASES = {
-    "small": Case("small", 1, 128, 4, 64, 64, 64),
+    # FLA-npu GDN AscendC kernels are validated around K=128 and V=128/256.
+    # Smaller head dims such as K=64/V=64 can fail host-side tiling before any precision comparison runs.
+    "small": Case("small", 1, 256, 4, 128, 128, 64),
     "medium": Case("medium", 1, 1024, 32, 128, 128, 64),
     "varlen": Case(
         "varlen",
@@ -359,6 +361,18 @@ def tensor_stats(actual, expected, atol: float, rtol: float, mask=None) -> dict[
 
 
 def run_one_case(case: Case, args: argparse.Namespace, flash_gdn) -> dict[str, object]:
+    print(
+        "running",
+        f"case={case.name}",
+        f"B={case.batch}",
+        f"T={case.seq_len}",
+        f"H={case.heads}",
+        f"K={case.key_dim}",
+        f"V={case.value_dim}",
+        f"chunk_size={case.chunk_size}",
+        f"varlen={case.cu_seqlens is not None}",
+        flush=True,
+    )
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
     device = torch.device(f"npu:{args.device}")
     torch.npu.set_device(args.device)

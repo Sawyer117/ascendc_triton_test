@@ -50,6 +50,7 @@ run_case() {
 # before investigating packed variable-length metadata and per-sequence resets.
 run_case fixed_small --case small
 run_case fixed_medium --case medium
+run_case fixed_1k_h8 --case small --seq-len 1024 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 run_case fixed_4k_h8 --case small --seq-len 4096 --heads 8 --key-dim 128 --value-dim 128 --chunk-size 64
 
 # Variable-length coverage. The order is intentional:

@@ -165,6 +165,8 @@ bash run_precision_suite.sh
 
 The suite writes logs and JSON under `./precision_results/`, then prints `./precision_results/summary.txt`. It runs fixed-length sanity first, then variable-length cases in this order:
 
+The bundled fixed-length cases use `K=128,V=128`; smaller K/V dimensions such as 64 are intentionally not used because the FLA-npu AscendC kernels are validated around `K=128` and can fail host-side tiling before a precision comparison starts.
+
 - `varlen_single_1024`: one packed segment, should behave like fixed length.
 - `varlen_aligned_1024`: multiple sequences with lengths aligned to `chunk_size`.
 - `varlen_unaligned_1121`: mixed non-aligned sequence lengths.
