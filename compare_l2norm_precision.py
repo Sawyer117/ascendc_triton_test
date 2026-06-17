@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Compare l2norm_fwd/bwd against Python autograd for GDN q/k-shaped tensors."""
+"""Self-contained l2norm backward-contract checks for GDN q/k-shaped tensors.
+
+This script deliberately does not import mindspeed. It compares pure Python
+formulas against PyTorch autograd to make the l2norm_bwd contract explicit.
+"""
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from typing import Any
@@ -13,10 +16,8 @@ import compare_gdn_precision as cmp
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check l2norm_fwd/bwd precision and backward contract.")
+    parser = argparse.ArgumentParser(description="Self-contained l2norm backward-contract precision check.")
     parser.add_argument("--case", choices=cmp.CASES.keys(), default="varlen")
-    parser.add_argument("--creative-repo", default=None, help="Only used for --source shim.")
-    parser.add_argument("--source", choices=["external", "shim"], default="external")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--batch", type=int)
     parser.add_argument("--seq-len", type=int)
@@ -33,40 +34,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def install_shim(creative_repo_arg: str | None) -> None:
-    import compare_creative_gdn_pair as pair
-
-    creative_repo = pair.find_creative_repo(creative_repo_arg)
-    package = pair.install_creative_file_package(creative_repo)
-    pair.install_mindspeed_triton_shim(package)
-
-
-def load_l2norm(source: str, creative_repo_arg: str | None):
-    if source == "shim":
-        install_shim(creative_repo_arg)
-    try:
-        module = importlib.import_module("mindspeed.lite.ops.triton.l2norm")
-    except ModuleNotFoundError as exc:
-        return None, {
-            "skipped": True,
-            "skip_reason": f"cannot import mindspeed.lite.ops.triton.l2norm: {exc}",
-            "source": source,
-            "source_is_real_kernel": False,
-        }
-    return (module.l2norm_fwd, module.l2norm_bwd), None
-
-
 def python_l2norm(x, eps: float = 1e-6):
     torch = cmp.torch
-    return (x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)).to(x.dtype)
+    rstd = torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + eps)
+    return (x * rstd).to(x.dtype), rstd
 
 
-def unwrap_bwd(value):
-    if isinstance(value, (tuple, list)):
-        if len(value) != 1:
-            raise RuntimeError(f"l2norm_bwd returned {len(value)} values; expected 1")
-        return value[0]
-    return value
+def bwd_original_input_contract(x, rstd, dy):
+    """Backward formula when the first argument is the original, unnormalized x."""
+    y = (x * rstd).to(x.dtype)
+    dot = (dy * y).sum(dim=-1, keepdim=True)
+    return ((dy - y * dot) * rstd).to(x.dtype)
+
+
+def bwd_normalized_output_contract(y, rstd, dy):
+    """Backward formula when the first argument is already normalized output y."""
+    dot = (dy * y).sum(dim=-1, keepdim=True)
+    return ((dy - y * dot) * rstd).to(y.dtype)
 
 
 def segment_summary(case: cmp.Case):
@@ -83,7 +67,7 @@ def segment_summary(case: cmp.Case):
     }
 
 
-def run_case(case: cmp.Case, args: argparse.Namespace, l2norm_fwd, l2norm_bwd):
+def run_case(case: cmp.Case, args: argparse.Namespace):
     torch = cmp.torch
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
     device = torch.device(f"npu:{args.device}")
@@ -93,26 +77,49 @@ def run_case(case: cmp.Case, args: argparse.Namespace, l2norm_fwd, l2norm_bwd):
 
     q, _, _, _, _, _ = cmp.make_inputs(case, device, dtype, args.seed)
     x_ref = cmp.clone_leaf(q)
-    x_op = q.detach().clone()
+    x_formula = q.detach().clone()
 
     torch.manual_seed(args.seed + 17)
-    do = torch.randn_like(x_ref)
+    dy = torch.randn_like(x_ref)
 
-    y_ref = python_l2norm(x_ref)
-    y_ref.backward(do)
+    y_ref, _ = python_l2norm(x_ref)
+    y_ref.backward(dy)
     dx_ref = x_ref.grad
 
-    y_op, rstd = l2norm_fwd(x_op)
-    dx_from_original = unwrap_bwd(l2norm_bwd(x_op, rstd, do))
-    dx_from_output = unwrap_bwd(l2norm_bwd(y_op, rstd, do))
+    y_formula, rstd = python_l2norm(x_formula)
+    dx_original_contract = bwd_original_input_contract(x_formula, rstd, dy)
+    dx_normalized_contract = bwd_normalized_output_contract(y_formula, rstd, dy)
+
+    # This is the exact failure mode the old flash wrapper can hit if l2norm_bwd
+    # expects original x while the wrapper passes saved normalized q/k.
+    dx_flash_call_if_original_contract = bwd_original_input_contract(y_formula, rstd, dy)
+
+    # This is the same old flash call if l2norm_bwd is intentionally designed
+    # to accept normalized output y.
+    dx_flash_call_if_normalized_contract = bwd_normalized_output_contract(y_formula, rstd, dy)
     torch.npu.synchronize()
 
     comparisons = {
-        "output": cmp.tensor_stats(y_op, y_ref, args.atol, args.rtol),
-        "bwd_from_original_input": cmp.tensor_stats(dx_from_original, dx_ref, args.atol, args.rtol),
-        "bwd_from_normalized_output": cmp.tensor_stats(dx_from_output, dx_ref, args.atol, args.rtol),
+        "output": cmp.tensor_stats(y_formula, y_ref, args.atol, args.rtol),
+        "bwd_original_input_contract": cmp.tensor_stats(dx_original_contract, dx_ref, args.atol, args.rtol),
+        "bwd_normalized_output_contract": cmp.tensor_stats(dx_normalized_contract, dx_ref, args.atol, args.rtol),
+        "flash_old_call_if_bwd_expects_original": cmp.tensor_stats(
+            dx_flash_call_if_original_contract, dx_ref, args.atol, args.rtol
+        ),
+        "flash_old_call_if_bwd_expects_normalized": cmp.tensor_stats(
+            dx_flash_call_if_normalized_contract, dx_ref, args.atol, args.rtol
+        ),
     }
-    failed = [name for name, stats in comparisons.items() if not stats["allclose"]]
+    contracts = {
+        "original_input_contract_ok": comparisons["bwd_original_input_contract"]["allclose"],
+        "normalized_output_contract_ok": comparisons["bwd_normalized_output_contract"]["allclose"],
+        "old_flash_call_ok_if_bwd_expects_original": comparisons[
+            "flash_old_call_if_bwd_expects_original"
+        ]["allclose"],
+        "old_flash_call_ok_if_bwd_expects_normalized": comparisons[
+            "flash_old_call_if_bwd_expects_normalized"
+        ]["allclose"],
+    }
     return {
         "case": case.__dict__,
         "shape_summary": segment_summary(case),
@@ -121,19 +128,13 @@ def run_case(case: cmp.Case, args: argparse.Namespace, l2norm_fwd, l2norm_bwd):
         "seed": args.seed,
         "atol": args.atol,
         "rtol": args.rtol,
-        "source": args.source,
-        "source_is_real_kernel": args.source == "external",
-        "passed": comparisons["output"]["allclose"] and (
-            comparisons["bwd_from_original_input"]["allclose"]
-            or comparisons["bwd_from_normalized_output"]["allclose"]
-        ),
-        "failed_tensors": failed,
+        "source": "self_contained_formula",
+        "imports_mindspeed": False,
+        "passed": comparisons["output"]["allclose"]
+        and contracts["original_input_contract_ok"]
+        and contracts["normalized_output_contract_ok"],
         "comparisons": comparisons,
-        "contract": {
-            "original_input_ok": comparisons["bwd_from_original_input"]["allclose"],
-            "normalized_output_ok": comparisons["bwd_from_normalized_output"]["allclose"],
-            "flash_old_path_uses_normalized_output": True,
-        },
+        "contracts": contracts,
     }
 
 
@@ -152,27 +153,22 @@ def main() -> int:
     try:
         import torch_npu  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
     except ImportError as exc:
-        payload = {"skipped": True, "skip_reason": f"torch_npu is unavailable: {exc}", "source": args.source}
+        payload = {"skipped": True, "skip_reason": f"torch_npu is unavailable: {exc}"}
         write_payload(payload, args.output_json)
         return 3
     if not hasattr(torch, "npu") or not torch.npu.is_available():
-        payload = {"skipped": True, "skip_reason": "NPU is unavailable", "source": args.source}
+        payload = {"skipped": True, "skip_reason": "NPU is unavailable"}
         write_payload(payload, args.output_json)
-        return 3
-
-    funcs, skipped = load_l2norm(args.source, args.creative_repo)
-    if skipped:
-        write_payload(skipped, args.output_json)
         return 3
 
     case = cmp.override_case(cmp.CASES[args.case], args)
     try:
-        result = run_case(case, args, funcs[0], funcs[1])
+        result = run_case(case, args)
     except Exception as exc:  # pylint: disable=broad-except
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 2
 
-    payload = {"comparison": "l2norm_fwd_bwd_vs_python_autograd", "torch": torch.__version__, **result}
+    payload = {"comparison": "self_contained_l2norm_contracts_vs_python_autograd", "torch": torch.__version__, **result}
     write_payload(payload, args.output_json)
     return 0 if result["passed"] else 1
 

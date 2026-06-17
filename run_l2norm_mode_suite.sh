@@ -7,7 +7,6 @@ CREATIVE_REPO=${CREATIVE_REPO:-${SCRIPT_DIR}/creative_snapshot}
 DEVICE=${DEVICE:-0}
 DTYPE=${DTYPE:-bf16}
 OUT_DIR=${OUT_DIR:-./l2norm_mode_results}
-L2NORM_SOURCE=${L2NORM_SOURCE:-external}
 
 mkdir -p "${OUT_DIR}"
 find "${OUT_DIR}" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' -o -name 'summary.txt' \) -delete
@@ -51,15 +50,13 @@ run_l2norm() {
   local log="${OUT_DIR}/l2norm_${name}.log"
   local cmd=(
     "${PYTHON}" "${SCRIPT_DIR}/compare_l2norm_precision.py"
-    --source "${L2NORM_SOURCE}"
-    --creative-repo "${CREATIVE_REPO}"
     --device "${DEVICE}"
     --dtype "${DTYPE}"
     --output-json "${json}"
     "$@"
   )
 
-  echo "==> l2norm ${name} source=${L2NORM_SOURCE}"
+  echo "==> l2norm ${name} self-contained"
   printf '    %q' "${cmd[@]}"
   echo
   "${cmd[@]}" >"${log}" 2>&1
@@ -91,7 +88,6 @@ echo "  creative_repo: ${CREATIVE_REPO}"
 echo "  device:        ${DEVICE}"
 echo "  dtype:         ${DTYPE}"
 echo "  out_dir:       ${OUT_DIR}"
-echo "  l2norm_source: ${L2NORM_SOURCE}"
 echo
 
 run_gdn_pair fixed_1k_h8 \
@@ -148,16 +144,23 @@ for path in sorted(out_dir.glob("*.json")):
         )
     else:
         comps = payload.get("comparisons", {})
-        contract = payload.get("contract", {})
+        contracts = payload.get("contracts", {})
         out = comps.get("output", {})
-        bwd_orig = comps.get("bwd_from_original_input", {})
-        bwd_out = comps.get("bwd_from_normalized_output", {})
+        bwd_orig = comps.get("bwd_original_input_contract", {})
+        bwd_norm = comps.get("bwd_normalized_output_contract", {})
+        flash_orig = comps.get("flash_old_call_if_bwd_expects_original", {})
+        flash_norm = comps.get("flash_old_call_if_bwd_expects_normalized", {})
         rows.append(
             f"{path.stem}\ttype=l2norm\tsource={payload.get('source')}\tpassed={payload.get('passed')}"
-            f"\toriginal_input_ok={contract.get('original_input_ok')}\tnormalized_output_ok={contract.get('normalized_output_ok')}"
+            f"\toriginal_contract_ok={contracts.get('original_input_contract_ok')}"
+            f"\tnormalized_contract_ok={contracts.get('normalized_output_contract_ok')}"
+            f"\told_flash_if_original_ok={contracts.get('old_flash_call_ok_if_bwd_expects_original')}"
+            f"\told_flash_if_normalized_ok={contracts.get('old_flash_call_ok_if_bwd_expects_normalized')}"
             f"\toutput max_abs={out.get('max_abs', '-')} rms={out.get('rms', '-')}"
             f"\tbwd_orig max_abs={bwd_orig.get('max_abs', '-')} rms={bwd_orig.get('rms', '-')} mismatch={bwd_orig.get('mismatch_ratio', '-')}"
-            f"\tbwd_output max_abs={bwd_out.get('max_abs', '-')} rms={bwd_out.get('rms', '-')} mismatch={bwd_out.get('mismatch_ratio', '-')}"
+            f"\tbwd_norm max_abs={bwd_norm.get('max_abs', '-')} rms={bwd_norm.get('rms', '-')} mismatch={bwd_norm.get('mismatch_ratio', '-')}"
+            f"\tflash_if_orig max_abs={flash_orig.get('max_abs', '-')} rms={flash_orig.get('rms', '-')} mismatch={flash_orig.get('mismatch_ratio', '-')}"
+            f"\tflash_if_norm max_abs={flash_norm.get('max_abs', '-')} rms={flash_norm.get('rms', '-')} mismatch={flash_norm.get('mismatch_ratio', '-')}"
         )
 summary_path = out_dir / "summary.txt"
 summary_path.write_text("\n".join(rows) + "\n", encoding="utf-8")

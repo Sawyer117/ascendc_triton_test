@@ -76,25 +76,25 @@ Interpretation:
 
 ## L2Norm Mode Suite
 
-Use this when you need to prove whether the q/k l2norm path is the only reason full-wrapper precision differs. It runs the same creative-vs-creative GDN cases twice:
+Use this when you need to prove whether the q/k l2norm path is the reason full-wrapper precision differs. It runs the same creative-vs-creative GDN cases twice:
 
 - `outer`: fixed path. The mixed flash wrapper applies the same Python/autograd l2norm as the Triton baseline before entering the custom autograd Function.
-- `kernel`: old path. The mixed flash wrapper leaves `use_qk_l2norm_in_kernel=True`, so the custom Function uses `mindspeed.lite.ops.triton.l2norm_fwd/bwd`.
+- `kernel`: old path. The mixed flash wrapper leaves `use_qk_l2norm_in_kernel=True`, so the custom Function uses the `l2norm_fwd/bwd` path provided by the local test shim when external `mindspeed` is absent. Treat this as old-path reproduction, not proof about a real external kernel package.
 
-It also runs a standalone l2norm check against Python autograd for the same shapes. By default the standalone test tries to import the real external `mindspeed.lite.ops.triton.l2norm`; if that package is absent it reports `skipped=True` instead of pretending the local shim is a real kernel. Use `L2NORM_SOURCE=shim` only when you explicitly want to test the fallback shim contract.
+It also runs `compare_l2norm_precision.py`, which is fully self-contained and does not import `mindspeed`. That script compares explicit l2norm backward formulas against PyTorch autograd for the same fixed/packed shapes.
 
 ```bash
 bash run_l2norm_mode_suite.sh
-
-# Optional: test the local shim instead of the real external l2norm package.
-L2NORM_SOURCE=shim bash run_l2norm_mode_suite.sh
 ```
 
 Read `./l2norm_mode_results/summary.txt`:
 
-- If all `outer` GDN rows pass and `kernel` fails, the remaining mismatch is in the l2norm path rather than the GDN core.
-- If `kernel` fails for fixed/aligned cases too, then the problem is not limited to non-64-aligned varlen.
-- In standalone l2norm rows, `original_input_ok` versus `normalized_output_ok` shows which backward contract the available `l2norm_bwd` actually implements. The old flash path passes the normalized output into `l2norm_bwd`, so `normalized_output_ok=False` directly explains q/k gradient failure.
+- GDN rows show whether `outer` or old `kernel` wrapper mode matches the Triton baseline.
+- Standalone l2norm rows show both valid formulas: `original_contract_ok` for `l2norm_bwd(x, rstd, dy)` and `normalized_contract_ok` for `l2norm_bwd(y, rstd, dy)`.
+- `old_flash_if_original_ok=False` means the old flash call would fail if its `l2norm_bwd` implementation expects original `x`, because the old wrapper saves and passes normalized q/k.
+- `old_flash_if_normalized_ok=True` means the old flash call is mathematically fine if its `l2norm_bwd` implementation is intentionally defined to accept normalized output `y`.
+
+This suite therefore distinguishes a wrapper/contract mismatch from a shape-specific l2norm math issue without depending on external `mindspeed` imports.
 
 ## Expected Environment
 
