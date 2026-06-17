@@ -38,10 +38,11 @@ VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
     "ascendc": (False, False, False, False),
     "manual_ascendc": (False, False, False, False),
     "triton_full": (False, False, False, False),
-    "triton_dvlocal": (True, False, False, False),
     "triton_dqkwg": (False, False, True, False),
     "triton_wy": (False, False, False, True),
     "triton_both": (False, False, True, True),
+    # Keep dv_local late in --variant all because this experimental hybrid can perturb later NPU work.
+    "triton_dvlocal": (True, False, False, False),
     "triton_dhu": (False, True, False, False),
     "triton_dvlocal_dhu": (True, True, False, False),
     "triton_dhu_dqkwg": (False, True, True, False),

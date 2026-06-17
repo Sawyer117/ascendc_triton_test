@@ -87,26 +87,33 @@ case "${MODE}" in
     ;;
 esac
 
-"${PYTHON}" - "${OUT_DIR}" "${VARIANT}" <<'PY'
+"${PYTHON}" - "${OUT_DIR}" "${VARIANT}" "${MODE}" <<'PY'
 import json
 import pathlib
 import sys
 
 out_dir = pathlib.Path(sys.argv[1])
 variant_env = sys.argv[2]
-case_files = {
+mode = sys.argv[3]
+all_case_files = {
     "fixed_1k_h8": out_dir / "fixed_1k_h8.json",
     "varlen_single_1024": out_dir / "varlen_single_1024.json",
     "varlen_aligned_1024": out_dir / "varlen_aligned_1024.json",
     "target_single_1121": out_dir / "target_single_1121.json",
 }
+if mode == "target":
+    case_files = {"target_single_1121": all_case_files["target_single_1121"]}
+elif mode == "controls":
+    case_files = {name: all_case_files[name] for name in ("fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024")}
+else:
+    case_files = all_case_files
 cases = {}
 for name, path in case_files.items():
     if path.exists():
         cases[name] = json.loads(path.read_text())
 
 if variant_env == "all":
-    variants = ["ascendc", "manual_ascendc", "triton_full", "triton_dvlocal", "triton_dqkwg", "triton_wy", "triton_both"]
+    variants = ["ascendc", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
 else:
     variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]
