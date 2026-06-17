@@ -6,12 +6,14 @@ The FLA-npu backward computes:
     grad_k = dk_from_dqkwg + dk_from_prepare_wy_repr_bwd
 
 This diagnostic reuses the same inputs and PyTorch reference as
-compare_gdn_precision.py, then runs four backward variants:
+compare_gdn_precision.py, then runs targeted backward variants:
 
     ascendc:       original FLA-npu AscendC chain
+    triton_dhu:    replace only npu_chunk_gated_delta_rule_bwd_dhu
     triton_dqkwg:  replace only npu_chunk_bwd_dqkwg
     triton_wy:     replace only npu_prepare_wy_repr_bwd_da/full
-    triton_both:   replace both branches
+    triton_both:   replace dqkwg and WY branches
+    triton_all:    replace dhu, dqkwg, and WY branches
 
 The local Triton kernels live under ./local_triton and are used only by this
 diagnostic script.
@@ -31,11 +33,15 @@ from typing import Any
 import compare_gdn_precision as cmp
 
 
-VARIANTS: dict[str, tuple[bool, bool]] = {
-    "ascendc": (False, False),
-    "triton_dqkwg": (True, False),
-    "triton_wy": (False, True),
-    "triton_both": (True, True),
+# Tuple layout: replace_dhu, replace_dqkwg, replace_wy.
+VARIANTS: dict[str, tuple[bool, bool, bool]] = {
+    "ascendc": (False, False, False),
+    "triton_dhu": (True, False, False),
+    "triton_dqkwg": (False, True, False),
+    "triton_wy": (False, False, True),
+    "triton_dhu_dqkwg": (True, True, False),
+    "triton_both": (False, True, True),
+    "triton_all": (True, True, True),
 }
 
 
@@ -68,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-qk-l2norm", action="store_true")
     parser.add_argument("--output-json", type=str)
     parser.add_argument(
+        "--tail-topk",
+        type=int,
+        default=8,
+        help="Number of largest grad_k tail errors to print and write to JSON.",
+    )
+    parser.add_argument(
         "--variant",
         choices=[*VARIANTS.keys(), "all"],
         default="all",
@@ -97,9 +109,14 @@ def load_local_triton():
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
+    chunk_delta_h = importlib.import_module("local_triton.chunk_delta_h")
     chunk_o = importlib.import_module("local_triton.chunk_o")
     wy_fast = importlib.import_module("local_triton.wy_fast")
-    return chunk_o.chunk_bwd_dqkwg, wy_fast.prepare_wy_repr_bwd
+    return (
+        chunk_delta_h.chunk_gated_delta_rule_bwd_dhu,
+        chunk_o.chunk_bwd_dqkwg,
+        wy_fast.prepare_wy_repr_bwd,
+    )
 
 
 def hf_to_tf(x):
@@ -176,6 +193,7 @@ def run_reference(case: cmp.Case, args: argparse.Namespace, inputs: tuple[Any, .
 
 def run_backward_components(
     flash_module,
+    triton_dhu,
     triton_dqkwg,
     triton_wy,
     *,
@@ -192,6 +210,7 @@ def run_backward_components(
     chunk_indices,
     chunk_indices_list,
     chunk_size: int,
+    replace_dhu: bool,
     replace_dqkwg: bool,
     replace_wy: bool,
 ):
@@ -242,23 +261,40 @@ def run_backward_components(
         chunk_indices=chunk_idx_list,
     )
 
-    dh, _, dv_mid = torch.ops.npu.npu_chunk_gated_delta_rule_bwd_dhu(
-        q,
-        k,
-        w,
-        do_hf,
-        dv_local,
-        scale,
-        chunk_size,
-        g=g_hf,
-        gK=None,
-        h0=None,
-        dht=None,
-        cu_seqlens=cu_seqlens_list,
-        chunk_indices=chunk_idx_list,
-        use_exp2=False,
-        transpose_state_layout=False,
-    )
+    if replace_dhu:
+        dh_tf, _, dv_mid_tf = triton_dhu(
+            q=hf_to_tf(q),
+            k=hf_to_tf(k),
+            w=hf_to_tf(w),
+            do=do,
+            dv=hf_to_tf(dv_local),
+            g=g,
+            h0=None,
+            dht=None,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+        )
+        dh = dh_tf.transpose(1, 2).contiguous()
+        dv_mid = tf_to_hf(dv_mid_tf)
+    else:
+        dh, _, dv_mid = torch.ops.npu.npu_chunk_gated_delta_rule_bwd_dhu(
+            q,
+            k,
+            w,
+            do_hf,
+            dv_local,
+            scale,
+            chunk_size,
+            g=g_hf,
+            gK=None,
+            h0=None,
+            dht=None,
+            cu_seqlens=cu_seqlens_list,
+            chunk_indices=chunk_idx_list,
+            use_exp2=False,
+            transpose_state_layout=False,
+        )
 
     if replace_dqkwg:
         dq_tf, dk_tf, dw_tf, dg_tf = triton_dqkwg(
@@ -372,6 +408,7 @@ def run_variant(
     case: cmp.Case,
     args: argparse.Namespace,
     flash_module,
+    triton_dhu,
     triton_dqkwg,
     triton_wy,
     inputs: tuple[Any, ...],
@@ -379,7 +416,7 @@ def run_variant(
 ):
     torch = cmp.torch
     q, k, v, beta, g, cu = inputs
-    replace_dqkwg, replace_wy = VARIANTS[name]
+    replace_dhu, replace_dqkwg, replace_wy = VARIANTS[name]
     use_qk_l2norm = not args.no_qk_l2norm
 
     q_hf = q.transpose(1, 2).contiguous()
@@ -415,6 +452,7 @@ def run_variant(
 
     parts = run_backward_components(
         flash_module,
+        triton_dhu,
         triton_dqkwg,
         triton_wy,
         q=q_work,
@@ -430,6 +468,7 @@ def run_variant(
         chunk_indices=chunk_indices,
         chunk_indices_list=chunk_indices_list,
         chunk_size=case.chunk_size,
+        replace_dhu=replace_dhu,
         replace_dqkwg=replace_dqkwg,
         replace_wy=replace_wy,
     )
@@ -483,6 +522,186 @@ def component_delta(left: dict[str, Any], right: dict[str, Any], cu, args: argpa
     return out
 
 
+
+def valid_token_mask(case: cmp.Case, cu, device):
+    torch = cmp.torch
+    if cu is None:
+        return torch.ones(case.batch, case.seq_len, device=device, dtype=torch.bool)
+    return cmp.varlen_valid_mask(cu, device)
+
+
+def mask_packed_range(case: cmp.Case, cu, device, start: int, end: int):
+    torch = cmp.torch
+    if end <= start:
+        return None
+    if cu is None:
+        mask = torch.zeros(case.batch, case.seq_len, device=device, dtype=torch.bool)
+        start = max(0, min(start, case.seq_len))
+        end = max(start, min(end, case.seq_len))
+        mask[:, start:end] = True
+        return mask
+
+    cu_list = [int(x) for x in cu.detach().cpu().tolist()]
+    batch = len(cu_list) - 1
+    max_len = max(cu_list[i + 1] - cu_list[i] for i in range(batch))
+    mask = torch.zeros(batch, max_len, device=device, dtype=torch.bool)
+    for seq_idx in range(batch):
+        seq_start, seq_end = cu_list[seq_idx], cu_list[seq_idx + 1]
+        left = max(start, seq_start)
+        right = min(end, seq_end)
+        if right > left:
+            mask[seq_idx, left - seq_start : right - seq_start] = True
+    return mask
+
+
+def sequence_partial_tail_mask(cu, device, chunk_size: int):
+    torch = cmp.torch
+    if cu is None:
+        return None
+    cu_list = [int(x) for x in cu.detach().cpu().tolist()]
+    batch = len(cu_list) - 1
+    max_len = max(cu_list[i + 1] - cu_list[i] for i in range(batch))
+    mask = torch.zeros(batch, max_len, device=device, dtype=torch.bool)
+    for seq_idx in range(batch):
+        length = cu_list[seq_idx + 1] - cu_list[seq_idx]
+        tail = length % chunk_size
+        if tail:
+            mask[seq_idx, length - tail : length] = True
+    return mask if bool(mask.any().item()) else None
+
+
+def packed_index_for_token(cu, seq_idx: int, token_idx: int, seq_len: int) -> int:
+    if cu is None:
+        return seq_idx * seq_len + token_idx
+    cu_list = [int(x) for x in cu.detach().cpu().tolist()]
+    return cu_list[seq_idx] + token_idx
+
+
+def topk_errors(actual, expected, mask, cu, case: cmp.Case, limit: int):
+    torch = cmp.torch
+    if limit <= 0 or mask is None or not bool(mask.any().item()):
+        return []
+    actual_f = actual.detach().float()
+    expected_f = expected.detach().float()
+    expanded_mask = mask.to(device=actual_f.device, dtype=torch.bool)
+    while expanded_mask.ndim < actual_f.ndim:
+        expanded_mask = expanded_mask.unsqueeze(-1)
+    expanded_mask = expanded_mask.expand_as(actual_f)
+    diff = (actual_f - expected_f).abs()
+    selected_count = int(expanded_mask.sum().item())
+    if selected_count == 0:
+        return []
+    scores = diff.masked_fill(~expanded_mask, -1).flatten()
+    k = min(int(limit), selected_count)
+    values, flat_indices = torch.topk(scores, k=k)
+    rows = []
+    shape = actual_f.shape
+    for value, flat_index in zip(values.detach().cpu().tolist(), flat_indices.detach().cpu().tolist()):
+        if value < 0:
+            continue
+        coords = []
+        remainder = int(flat_index)
+        for dim in reversed(shape):
+            coords.append(remainder % dim)
+            remainder //= dim
+        coords = list(reversed(coords))
+        seq_idx, token_idx = coords[0], coords[1]
+        head_idx = coords[2] if len(coords) > 2 else None
+        dim_idx = coords[3] if len(coords) > 3 else None
+        actual_value = actual_f[tuple(coords)].item()
+        expected_value = expected_f[tuple(coords)].item()
+        rows.append(
+            {
+                "seq": int(seq_idx),
+                "token": int(token_idx),
+                "packed_token": int(packed_index_for_token(cu, seq_idx, token_idx, case.seq_len)),
+                "head": None if head_idx is None else int(head_idx),
+                "dim": None if dim_idx is None else int(dim_idx),
+                "actual": float(actual_value),
+                "expected": float(expected_value),
+                "abs_diff": float(value),
+                "rel_diff": float(value / max(abs(expected_value), 1e-12)),
+            }
+        )
+    return rows
+
+
+def tail_reports(raw: dict[str, Any], reference: dict[str, Any], case: cmp.Case, cu, args: argparse.Namespace):
+    device = raw["grad_k"].device
+    actual = maybe_unflatten(cu, raw["grad_k"])
+    expected = reference["grad_k"]
+    valid = valid_token_mask(case, cu, device)
+    reports = {}
+
+    total_tail = case.seq_len % case.chunk_size
+    if total_tail:
+        packed_tail = mask_packed_range(case, cu, device, case.seq_len - total_tail, case.seq_len)
+        if packed_tail is not None and bool(packed_tail.any().item()):
+            reports["packed_final_tail"] = {
+                "token_count": int(packed_tail.sum().item()),
+                "packed_range": [case.seq_len - total_tail, case.seq_len],
+                "stats": cmp.tensor_stats(actual, expected, args.atol, args.rtol, packed_tail),
+                "top_errors": topk_errors(actual, expected, packed_tail, cu, case, args.tail_topk),
+            }
+            non_tail = valid & ~packed_tail
+            if bool(non_tail.any().item()):
+                reports["packed_non_tail"] = {
+                    "token_count": int(non_tail.sum().item()),
+                    "stats": cmp.tensor_stats(actual, expected, args.atol, args.rtol, non_tail),
+                }
+
+    seq_tail = sequence_partial_tail_mask(cu, device, case.chunk_size)
+    if seq_tail is not None:
+        reports["sequence_partial_tails"] = {
+            "token_count": int(seq_tail.sum().item()),
+            "stats": cmp.tensor_stats(actual, expected, args.atol, args.rtol, seq_tail),
+            "top_errors": topk_errors(actual, expected, seq_tail, cu, case, args.tail_topk),
+        }
+    return reports
+
+
+def print_tail_summary(name: str, reports: dict[str, Any]):
+    packed_tail = reports.get("packed_final_tail")
+    if packed_tail is not None:
+        stats = packed_tail["stats"]
+        print(
+            "    packed_tail_grad_k",
+            f"tokens={packed_tail['token_count']}",
+            f"range={packed_tail['packed_range']}",
+            f"allclose={stats['allclose']}",
+            f"max_abs={stats['max_abs']:.6g}",
+            f"rms={stats['rms']:.6g}",
+            f"mismatch={stats['mismatch_ratio']:.6g}",
+            flush=True,
+        )
+    non_tail = reports.get("packed_non_tail")
+    if non_tail is not None:
+        stats = non_tail["stats"]
+        print(
+            "    non_tail_grad_k",
+            f"tokens={non_tail['token_count']}",
+            f"allclose={stats['allclose']}",
+            f"max_abs={stats['max_abs']:.6g}",
+            f"rms={stats['rms']:.6g}",
+            f"mismatch={stats['mismatch_ratio']:.6g}",
+            flush=True,
+        )
+
+
+def print_tail_top_errors(name: str, reports: dict[str, Any]):
+    packed_tail = reports.get("packed_final_tail")
+    if not packed_tail or not packed_tail.get("top_errors"):
+        return
+    print(f"\ntop grad_k errors in packed final tail ({name})")
+    for row in packed_tail["top_errors"]:
+        print(
+            "  "
+            f"packed={row['packed_token']} seq={row['seq']} tok={row['token']} "
+            f"h={row['head']} d={row['dim']} "
+            f"actual={row['actual']:.8g} expected={row['expected']:.8g} "
+            f"abs={row['abs_diff']:.8g} rel={row['rel_diff']:.8g}"
+        )
+
 def failed_tensors(comparisons: dict[str, Any]) -> list[str]:
     return [name for name, stats in comparisons.items() if not stats["allclose"]]
 
@@ -494,6 +713,10 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
     if variant_results["ascendc"]["comparisons"]["grad_k"]["allclose"]:
         return "ascendc grad_k already passes; no failing branch in this case."
 
+    dhu_ok = (
+        "triton_dhu" in present
+        and variant_results["triton_dhu"]["comparisons"]["grad_k"]["allclose"]
+    )
     dqkwg_ok = (
         "triton_dqkwg" in present
         and variant_results["triton_dqkwg"]["comparisons"]["grad_k"]["allclose"]
@@ -502,19 +725,27 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
         "triton_wy" in present
         and variant_results["triton_wy"]["comparisons"]["grad_k"]["allclose"]
     )
-    both_ok = (
+    late_both_ok = (
         "triton_both" in present
         and variant_results["triton_both"]["comparisons"]["grad_k"]["allclose"]
     )
+    all_ok = (
+        "triton_all" in present
+        and variant_results["triton_all"]["comparisons"]["grad_k"]["allclose"]
+    )
+    if dhu_ok:
+        return "Most likely culprit: npu_chunk_gated_delta_rule_bwd_dhu."
     if dqkwg_ok and not wy_ok:
         return "Most likely culprit: npu_chunk_bwd_dqkwg."
     if wy_ok and not dqkwg_ok:
         return "Most likely culprit: npu_prepare_wy_repr_bwd_da/full."
     if dqkwg_ok and wy_ok:
-        return "Both single replacements make grad_k pass; inspect component deltas for the primary drift."
-    if both_ok:
-        return "Only replacing both branches makes grad_k pass; the error is split across dqkwg and WY backward."
-    return "No Triton replacement fixed grad_k; check earlier backward inputs or Triton layout compatibility."
+        return "Both late-branch replacements make grad_k pass; inspect component deltas."
+    if late_both_ok:
+        return "Only replacing dqkwg+WY makes grad_k pass; error is split across late branches."
+    if all_ok:
+        return "Only replacing dhu+dqkwg+WY makes grad_k pass; dhu and a later branch both contribute or Triton layouts differ."
+    return "No Triton replacement fixed grad_k; check fwd_h/v_new/A or Triton layout compatibility."
 
 
 def segment_summary(cu_seqlens: tuple[int, ...] | None, total_tokens: int, chunk_size: int):
@@ -543,7 +774,7 @@ def main() -> int:
         if hasattr(torch.npu, "set_compile_mode"):
             torch.npu.set_compile_mode(jit_compile=False)
 
-        triton_dqkwg, triton_wy = load_local_triton()
+        triton_dhu, triton_dqkwg, triton_wy = load_local_triton()
         case = cmp.override_case(cmp.CASES[args.case], args)
         dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
         inputs = cmp.make_inputs(case, device, dtype, args.seed)
@@ -569,19 +800,23 @@ def main() -> int:
                 case,
                 args,
                 flash_module,
+                triton_dhu,
                 triton_dqkwg,
                 triton_wy,
                 inputs,
                 do,
             )
             comparisons = compare_outputs(raw, reference, inputs[-1], args)
+            tails = tail_reports(raw, reference, case, inputs[-1], args)
             raw_results[name] = raw
             variant_results[name] = {
-                "replace_dqkwg": VARIANTS[name][0],
-                "replace_wy": VARIANTS[name][1],
+                "replace_dhu": VARIANTS[name][0],
+                "replace_dqkwg": VARIANTS[name][1],
+                "replace_wy": VARIANTS[name][2],
                 "passed": all(stats["allclose"] for stats in comparisons.values()),
                 "failed_tensors": failed_tensors(comparisons),
                 "comparisons": comparisons,
+                "tail_reports": tails,
             }
             grad_k = comparisons["grad_k"]
             print(
@@ -592,6 +827,13 @@ def main() -> int:
                 f"mismatch={grad_k['mismatch_ratio']:.6g}",
                 flush=True,
             )
+            print_tail_summary(name, tails)
+
+        if "ascendc" in variant_results:
+            print_tail_top_errors("ascendc", variant_results["ascendc"].get("tail_reports", {}))
+        elif len(variant_results) == 1:
+            only_name = next(iter(variant_results))
+            print_tail_top_errors(only_name, variant_results[only_name].get("tail_reports", {}))
 
         component_deltas = {}
         if "ascendc" in raw_results and "triton_both" in raw_results:

@@ -215,22 +215,35 @@ python diagnose_gradk_operator.py \
   --chunk-size 64 \
   --fla-repo ./flash-linear-attention-npu \
   --device 0 \
+  --tail-topk 16 \
   --output-json ./precision_results/diagnose_single_1121.json
 ```
 
-The diagnostic runs four variants:
+For partial-tail failures, focus on these extra lines in the output:
+
+- `packed_tail_grad_k`: metrics only for the final packed tail block, e.g. tokens `[1088,1121)` when `T=1121, chunk_size=64`.
+- `non_tail_grad_k`: metrics for all valid tokens outside that final packed tail block.
+- `top grad_k errors in packed final tail`: concrete `(packed_token, seq, token, head, dim)` coordinates and values for the largest tail errors.
+
+The diagnostic also writes the same tail reports into JSON under each variant's `tail_reports`.
+
+The diagnostic runs these variants:
 
 - `ascendc`: original full AscendC backward.
+- `triton_dhu`: only `npu_chunk_gated_delta_rule_bwd_dhu` is replaced by the local Triton kernel.
 - `triton_dqkwg`: only `npu_chunk_bwd_dqkwg` is replaced by the local Triton kernel.
 - `triton_wy`: only `npu_prepare_wy_repr_bwd_da/full` is replaced by the local Triton WY backward.
-- `triton_both`: both branches are replaced.
+- `triton_dhu_dqkwg`: replace `bwd_dhu` and `dqkwg`.
+- `triton_both`: replace `dqkwg` and WY backward, but keep `bwd_dhu` as AscendC.
+- `triton_all`: replace `bwd_dhu`, `dqkwg`, and WY backward.
 
 Read the result as follows:
 
+- If `ascendc` fails and `triton_dhu` passes, the likely bad operator is `npu_chunk_gated_delta_rule_bwd_dhu`.
 - If `ascendc` fails and `triton_dqkwg` passes, the likely bad operator is `npu_chunk_bwd_dqkwg`.
 - If `ascendc` fails and `triton_wy` passes, the likely bad operator is `npu_prepare_wy_repr_bwd_da/full`.
-- If only `triton_both` passes, the error is split across the two backward branches.
-- If no Triton replacement passes, check the earlier backward inputs (`dv`, `dh`, `h`, `v_new`) or a layout mismatch in the diagnostic.
+- If only `triton_both` or `triton_all` passes, the error is split across multiple backward branches.
+- If no Triton replacement passes, check earlier forward/backward intermediates (`h`, `v_new`, `A`) or a layout mismatch in the diagnostic.
 
 The script also prints component deltas for `dk_from_dqkwg` and `dk_from_wy`, so the final verdict is not based only on one full-gradient pass/fail.
 
