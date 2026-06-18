@@ -145,7 +145,7 @@ Read the summary:
 - `q_kernel_vs_ref` / `k_kernel_vs_ref`: final q/k gradients from real l2norm kernel vs full PyTorch GDN reference.
 - `q_py_norm_vs_ref` / `k_py_norm_vs_ref`: final q/k gradients from PyTorch l2norm formula vs full PyTorch GDN reference.
 
-For the target `cu_seqlens=0,1121` failure, the observed result is: q-side passes, k-side kernel fails, and k-side PyTorch formula passes on the same `dk_core`. This localizes the issue to k-side real `l2norm_bwd` in the GDN backward context.
+For the target `cu_seqlens=0,1121` failure, the latest observed result is: q-side and k-side real `l2norm_bwd` both pass when called directly with reconstructed real GDN-context tensors, including real `dk_core` and tail-focused controls. This means the standalone and direct GDN-context l2norm math are not enough to reproduce the original wrapper failure. The remaining gap is the original full wrapper/autograd path around the final q/k l2norm backward step.
 
 
 ## Expected Environment
