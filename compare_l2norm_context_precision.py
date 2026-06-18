@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atol", type=float, default=1e-2)
     parser.add_argument("--rtol", type=float, default=1e-2)
     parser.add_argument("--output-json", type=str)
+    parser.add_argument("--topk", type=int, default=16)
     return parser.parse_args()
 
 
@@ -116,6 +117,50 @@ def segment_lengths(case: cmp.Case) -> list[int]:
     return [b - a for a, b in zip(case.cu_seqlens, case.cu_seqlens[1:])]
 
 
+def tail_mask_for_bhtd(case: cmp.Case, device):
+    torch = cmp.torch
+    lengths = segment_lengths(case)
+    tails = [length % case.chunk_size for length in lengths]
+    if not any(tails):
+        return None
+    mask = torch.zeros(case.batch, case.heads, case.seq_len, device=device, dtype=torch.bool)
+    if case.cu_seqlens is None:
+        for length, rem in zip(lengths, tails):
+            if rem:
+                mask[:, :, length - rem : length] = True
+    else:
+        for start, length, rem in zip(case.cu_seqlens[:-1], lengths, tails):
+            if rem:
+                mask[:, :, start + length - rem : start + length] = True
+    return mask
+
+
+def segment_info_for_packed_token(case: cmp.Case, token: int):
+    if case.cu_seqlens is None:
+        length = case.seq_len
+        rem = length % case.chunk_size
+        return {
+            "seq": 0,
+            "token_in_seq": token,
+            "seq_len": length,
+            "tail_len": rem,
+            "in_tail": bool(rem and token >= length - rem),
+        }
+    for seq, (start, end) in enumerate(zip(case.cu_seqlens, case.cu_seqlens[1:])):
+        if start <= token < end:
+            length = end - start
+            rem = length % case.chunk_size
+            token_in_seq = token - start
+            return {
+                "seq": seq,
+                "token_in_seq": token_in_seq,
+                "seq_len": length,
+                "tail_len": rem,
+                "in_tail": bool(rem and token_in_seq >= length - rem),
+            }
+    return {"seq": None, "token_in_seq": None, "seq_len": None, "tail_len": None, "in_tail": False}
+
+
 def tail_mask_for_bthd(case: cmp.Case, device):
     torch = cmp.torch
     lengths = segment_lengths(case)
@@ -155,8 +200,13 @@ def tensor_meta(tensor):
     }
 
 
-def tensor_value_stats(tensor):
+def tensor_value_stats(tensor, mask=None):
     t = tensor.detach().float()
+    if mask is not None:
+        mask = mask.to(device=t.device, dtype=torch.bool)
+        while mask.ndim < t.ndim:
+            mask = mask.unsqueeze(-1)
+        t = t[mask.expand_as(t)]
     return {
         "min": float(t.min().item()),
         "max": float(t.max().item()),
@@ -164,7 +214,51 @@ def tensor_value_stats(tensor):
         "rms": float((t * t).mean().sqrt().item()),
         "zero_ratio": float((t == 0).float().mean().item()),
         "finite": bool(t.isfinite().all().item()),
+        "numel": int(t.numel()),
     }
+
+
+def topk_error_details(actual, expected, x_norm, rstd, dy, case: cmp.Case, args: argparse.Namespace, mask=None):
+    torch = cmp.torch
+    actual_f = actual.detach().float()
+    expected_f = expected.detach().float()
+    diff = (actual_f - expected_f).abs()
+    if mask is not None:
+        mask = mask.to(device=diff.device, dtype=torch.bool)
+        while mask.ndim < diff.ndim:
+            mask = mask.unsqueeze(-1)
+        diff = diff.masked_fill(~mask.expand_as(diff), -1)
+    flat = diff.flatten()
+    k = min(args.topk, flat.numel())
+    vals, idxs = torch.topk(flat, k)
+    shape = list(diff.shape)
+    rows = []
+    for value, flat_idx in zip(vals.detach().cpu().tolist(), idxs.detach().cpu().tolist()):
+        if value < 0:
+            continue
+        idx = int(flat_idx)
+        dim = idx % shape[3]
+        idx //= shape[3]
+        token = idx % shape[2]
+        idx //= shape[2]
+        head = idx % shape[1]
+        batch = idx // shape[1]
+        rows.append(
+            {
+                "abs_diff": float(value),
+                "kernel": float(actual_f[batch, head, token, dim].item()),
+                "py": float(expected_f[batch, head, token, dim].item()),
+                "dk_core": float(dy.detach().float()[batch, head, token, dim].item()),
+                "x_norm": float(x_norm.detach().float()[batch, head, token, dim].item()),
+                "rstd": float(rstd.detach().float()[batch, head, token].item()),
+                "batch": int(batch),
+                "head": int(head),
+                "packed_token": int(token),
+                "dim": int(dim),
+                **segment_info_for_packed_token(case, int(token)),
+            }
+        )
+    return rows
 
 
 def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str, Any]:
@@ -247,6 +341,7 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
     dq_py_orig_bthd = to_bthd_for_compare(cu, dq_py_orig)
     dk_py_orig_bthd = to_bthd_for_compare(cu, dk_py_orig)
     tail_mask = tail_mask_for_bthd(case, device)
+    tail_mask_bhtd = tail_mask_for_bhtd(case, device)
 
     comparisons = {
         "q_kernel_vs_py_norm": compare(dq_kernel_bthd, dq_py_norm_bthd, args),
@@ -295,6 +390,20 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
         "tensor_value_stats": {
             "dq_core": tensor_value_stats(dq_core),
             "dk_core": tensor_value_stats(dk_core),
+        },
+        "tensor_tail_value_stats": {
+            "dq_core": tensor_value_stats(dq_core, tail_mask_bhtd) if tail_mask_bhtd is not None else None,
+            "dk_core": tensor_value_stats(dk_core, tail_mask_bhtd) if tail_mask_bhtd is not None else None,
+        },
+        "topk_errors": {
+            "k_kernel_vs_py_norm": topk_error_details(
+                dk_kernel_norm, dk_py_norm, k_norm, k_rstd, dk_core, case, args
+            ),
+            "tail_k_kernel_vs_py_norm": topk_error_details(
+                dk_kernel_norm, dk_py_norm, k_norm, k_rstd, dk_core, case, args, tail_mask_bhtd
+            )
+            if tail_mask_bhtd is not None
+            else [],
         },
         "passed": (
             comparisons["q_kernel_vs_py_norm"]["allclose"]

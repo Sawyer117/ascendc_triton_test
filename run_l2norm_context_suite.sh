@@ -82,11 +82,19 @@ for path in sorted(out_dir.glob('*.json')):
         continue
     comps = payload.get('comparisons', {})
     tails = payload.get('tail_reports', {})
+    dk_stats = (payload.get('tensor_value_stats') or {}).get('dk_core') or {}
+    dk_tail_stats = (payload.get('tensor_tail_value_stats') or {}).get('dk_core') or {}
+    topk = ((payload.get('topk_errors') or {}).get('k_kernel_vs_py_norm') or [{}])[0]
+    tail_topk = ((payload.get('topk_errors') or {}).get('tail_k_kernel_vs_py_norm') or [{}])[0]
     fields = [
         path.stem,
         f"passed={payload.get('passed')}",
         f"shape={payload.get('shape_bhtd')}",
         f"segment_tails={payload.get('segment_tails')}",
+        f"dk_core min={dk_stats.get('min')} max={dk_stats.get('max')} rms={dk_stats.get('rms')} zero={dk_stats.get('zero_ratio')}",
+        f"tail_dk_core min={dk_tail_stats.get('min')} max={dk_tail_stats.get('max')} rms={dk_tail_stats.get('rms')} zero={dk_tail_stats.get('zero_ratio')}",
+        f"top1 abs={topk.get('abs_diff')} idx=({topk.get('batch')},{topk.get('head')},{topk.get('packed_token')},{topk.get('dim')}) seq={topk.get('seq')} tok={topk.get('token_in_seq')} tail={topk.get('in_tail')} kernel={topk.get('kernel')} py={topk.get('py')} dk={topk.get('dk_core')} x={topk.get('x_norm')} rstd={topk.get('rstd')}",
+        f"tail_top1 abs={tail_topk.get('abs_diff')} idx=({tail_topk.get('batch')},{tail_topk.get('head')},{tail_topk.get('packed_token')},{tail_topk.get('dim')}) seq={tail_topk.get('seq')} tok={tail_topk.get('token_in_seq')} kernel={tail_topk.get('kernel')} py={tail_topk.get('py')} dk={tail_topk.get('dk_core')} x={tail_topk.get('x_norm')} rstd={tail_topk.get('rstd')}",
     ]
     for key in (
         'q_kernel_vs_py_norm',
