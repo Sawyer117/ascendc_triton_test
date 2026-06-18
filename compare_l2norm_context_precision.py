@@ -201,6 +201,7 @@ def tensor_meta(tensor):
 
 
 def tensor_value_stats(tensor, mask=None):
+    torch = cmp.torch
     t = tensor.detach().float()
     if mask is not None:
         mask = mask.to(device=t.device, dtype=torch.bool)
@@ -237,6 +238,7 @@ def compare_kernel_on_dy(label, flash_module, x_norm, rstd, dy, args: argparse.N
 
 
 def expanded_mask(mask, tensor):
+    torch = cmp.torch
     if mask is None:
         return None
     mask = mask.to(device=tensor.device, dtype=torch.bool)
