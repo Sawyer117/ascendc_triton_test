@@ -88,7 +88,17 @@ for path in sorted(out_dir.glob('*.json')):
         f"shape={payload.get('shape_bhtd')}",
         f"segment_tails={payload.get('segment_tails')}",
     ]
-    for key in ('q_kernel_vs_py_norm', 'k_kernel_vs_py_norm', 'q_kernel_vs_ref', 'k_kernel_vs_ref', 'q_py_norm_vs_ref', 'k_py_norm_vs_ref'):
+    for key in (
+        'q_kernel_vs_py_norm',
+        'k_kernel_vs_py_norm',
+        'k_kernel_dy_contig_vs_py_norm',
+        'k_kernel_dy_clone_vs_py_norm',
+        'k_kernel_all_clone_vs_py_norm',
+        'q_kernel_vs_ref',
+        'k_kernel_vs_ref',
+        'q_py_norm_vs_ref',
+        'k_py_norm_vs_ref',
+    ):
         item = comps.get(key, {})
         fields.append(
             f"{key} allclose={item.get('allclose')} max_abs={item.get('max_abs')} rms={item.get('rms')} mismatch={item.get('mismatch_ratio')}"

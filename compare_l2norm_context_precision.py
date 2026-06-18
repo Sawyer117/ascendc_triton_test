@@ -145,6 +145,28 @@ def compare(actual, expected, args: argparse.Namespace, mask=None):
     return cmp.tensor_stats(actual, expected, args.atol, args.rtol, mask)
 
 
+def tensor_meta(tensor):
+    return {
+        "shape": list(tensor.shape),
+        "stride": list(tensor.stride()),
+        "is_contiguous": bool(tensor.is_contiguous()),
+        "dtype": str(tensor.dtype),
+        "storage_offset": int(tensor.storage_offset()),
+    }
+
+
+def tensor_value_stats(tensor):
+    t = tensor.detach().float()
+    return {
+        "min": float(t.min().item()),
+        "max": float(t.max().item()),
+        "mean": float(t.mean().item()),
+        "rms": float((t * t).mean().sqrt().item()),
+        "zero_ratio": float((t == 0).float().mean().item()),
+        "finite": bool(t.isfinite().all().item()),
+    }
+
+
 def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str, Any]:
     torch = cmp.torch
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -202,6 +224,13 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
 
     dq_kernel_norm = flash_module.l2norm_bwd(q_norm, q_rstd, dq_core)
     dk_kernel_norm = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core)
+    dk_kernel_dy_contig = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core.contiguous())
+    dk_kernel_dy_clone = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core.detach().clone())
+    dk_kernel_all_clone = flash_module.l2norm_bwd(
+        k_norm.detach().clone().contiguous(),
+        k_rstd.detach().clone().contiguous(),
+        dk_core.detach().clone().contiguous(),
+    )
     dq_py_norm = py_l2norm_bwd_normalized(q_norm, q_rstd, dq_core)
     dk_py_norm = py_l2norm_bwd_normalized(k_norm, k_rstd, dk_core)
     dq_py_orig = py_l2norm_bwd_original(q_bhtd, q_rstd, dq_core)
@@ -210,6 +239,9 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
 
     dq_kernel_bthd = to_bthd_for_compare(cu, dq_kernel_norm)
     dk_kernel_bthd = to_bthd_for_compare(cu, dk_kernel_norm)
+    dk_kernel_dy_contig_bthd = to_bthd_for_compare(cu, dk_kernel_dy_contig)
+    dk_kernel_dy_clone_bthd = to_bthd_for_compare(cu, dk_kernel_dy_clone)
+    dk_kernel_all_clone_bthd = to_bthd_for_compare(cu, dk_kernel_all_clone)
     dq_py_norm_bthd = to_bthd_for_compare(cu, dq_py_norm)
     dk_py_norm_bthd = to_bthd_for_compare(cu, dk_py_norm)
     dq_py_orig_bthd = to_bthd_for_compare(cu, dq_py_orig)
@@ -219,6 +251,9 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
     comparisons = {
         "q_kernel_vs_py_norm": compare(dq_kernel_bthd, dq_py_norm_bthd, args),
         "k_kernel_vs_py_norm": compare(dk_kernel_bthd, dk_py_norm_bthd, args),
+        "k_kernel_dy_contig_vs_py_norm": compare(dk_kernel_dy_contig_bthd, dk_py_norm_bthd, args),
+        "k_kernel_dy_clone_vs_py_norm": compare(dk_kernel_dy_clone_bthd, dk_py_norm_bthd, args),
+        "k_kernel_all_clone_vs_py_norm": compare(dk_kernel_all_clone_bthd, dk_py_norm_bthd, args),
         "q_kernel_vs_ref": compare(dq_kernel_bthd, reference["grad_q"], args),
         "k_kernel_vs_ref": compare(dk_kernel_bthd, reference["grad_k"], args),
         "q_py_norm_vs_ref": compare(dq_py_norm_bthd, reference["grad_q"], args),
@@ -231,6 +266,9 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
         for key, actual, expected in (
             ("q_kernel_vs_py_norm", dq_kernel_bthd, dq_py_norm_bthd),
             ("k_kernel_vs_py_norm", dk_kernel_bthd, dk_py_norm_bthd),
+            ("k_kernel_dy_contig_vs_py_norm", dk_kernel_dy_contig_bthd, dk_py_norm_bthd),
+            ("k_kernel_dy_clone_vs_py_norm", dk_kernel_dy_clone_bthd, dk_py_norm_bthd),
+            ("k_kernel_all_clone_vs_py_norm", dk_kernel_all_clone_bthd, dk_py_norm_bthd),
             ("q_kernel_vs_ref", dq_kernel_bthd, reference["grad_q"]),
             ("k_kernel_vs_ref", dk_kernel_bthd, reference["grad_k"]),
             ("q_py_norm_vs_ref", dq_py_norm_bthd, reference["grad_q"]),
@@ -246,6 +284,18 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
         "seed": args.seed,
         "segment_lengths": segment_lengths(case),
         "segment_tails": [length % case.chunk_size for length in segment_lengths(case)],
+        "tensor_meta": {
+            "q_norm": tensor_meta(q_norm),
+            "k_norm": tensor_meta(k_norm),
+            "q_rstd": tensor_meta(q_rstd),
+            "k_rstd": tensor_meta(k_rstd),
+            "dq_core": tensor_meta(dq_core),
+            "dk_core": tensor_meta(dk_core),
+        },
+        "tensor_value_stats": {
+            "dq_core": tensor_value_stats(dq_core),
+            "dk_core": tensor_value_stats(dk_core),
+        },
         "passed": (
             comparisons["q_kernel_vs_py_norm"]["allclose"]
             and comparisons["k_kernel_vs_py_norm"]["allclose"]
