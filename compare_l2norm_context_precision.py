@@ -218,6 +218,68 @@ def tensor_value_stats(tensor, mask=None):
     }
 
 
+def compare_kernel_on_dy(label, flash_module, x_norm, rstd, dy, args: argparse.Namespace, case: cmp.Case, tail_mask_bhtd=None):
+    kernel = flash_module.l2norm_bwd(x_norm, rstd, dy)
+    py = py_l2norm_bwd_normalized(x_norm, rstd, dy)
+    stats = compare(kernel, py, args)
+    tail_stats = compare(kernel, py, args, tail_mask_bhtd) if tail_mask_bhtd is not None else None
+    return {
+        "label": label,
+        "stats": stats,
+        "tail_stats": tail_stats,
+        "dy_stats": tensor_value_stats(dy),
+        "tail_dy_stats": tensor_value_stats(dy, tail_mask_bhtd) if tail_mask_bhtd is not None else None,
+        "top1": topk_error_details(kernel, py, x_norm, rstd, dy, case, args, None)[:1],
+        "tail_top1": topk_error_details(kernel, py, x_norm, rstd, dy, case, args, tail_mask_bhtd)[:1]
+        if tail_mask_bhtd is not None
+        else [],
+    }
+
+
+def expanded_mask(mask, tensor):
+    if mask is None:
+        return None
+    mask = mask.to(device=tensor.device, dtype=torch.bool)
+    while mask.ndim < tensor.ndim:
+        mask = mask.unsqueeze(-1)
+    return mask.expand_as(tensor)
+
+
+def make_dy_controls(dy, case: cmp.Case, args: argparse.Namespace, tail_mask_bhtd=None):
+    torch = cmp.torch
+    controls = {"real": dy}
+
+    torch.manual_seed(args.seed + 101)
+    rand = torch.randn_like(dy)
+    dy_rms = dy.detach().float().square().mean().sqrt().clamp_min(1e-12)
+    rand_rms = rand.detach().float().square().mean().sqrt().clamp_min(1e-12)
+    controls["random_same_rms"] = (rand * (dy_rms / rand_rms)).to(dy.dtype)
+
+    torch.manual_seed(args.seed + 102)
+    flat = dy.flatten()
+    perm = torch.randperm(flat.numel(), device=dy.device)
+    controls["shuffle_flat"] = flat[perm].reshape_as(dy).contiguous()
+
+    torch.manual_seed(args.seed + 103)
+    token_perm = torch.randperm(dy.shape[2], device=dy.device)
+    controls["shuffle_tokens"] = dy[:, :, token_perm, :].contiguous()
+
+    mask = expanded_mask(tail_mask_bhtd, dy)
+    if mask is not None:
+        zero = torch.zeros_like(dy)
+        controls["tail_only"] = torch.where(mask, dy, zero)
+        controls["tail_zero"] = torch.where(mask, zero, dy)
+
+        torch.manual_seed(args.seed + 104)
+        rand_tail = torch.randn_like(dy)
+        tail_values = dy.detach().float()[mask]
+        tail_rms = tail_values.square().mean().sqrt().clamp_min(1e-12)
+        rand_tail_rms = rand_tail.detach().float()[mask].square().mean().sqrt().clamp_min(1e-12)
+        controls["random_tail_same_rms"] = torch.where(mask, (rand_tail * (tail_rms / rand_tail_rms)).to(dy.dtype), zero)
+
+    return controls
+
+
 def topk_error_details(actual, expected, x_norm, rstd, dy, case: cmp.Case, args: argparse.Namespace, mask=None):
     torch = cmp.torch
     actual_f = actual.detach().float()
@@ -343,6 +405,11 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
     tail_mask = tail_mask_for_bthd(case, device)
     tail_mask_bhtd = tail_mask_for_bhtd(case, device)
 
+    dy_control_reports = {
+        name: compare_kernel_on_dy(name, flash_module, k_norm, k_rstd, dy_value, args, case, tail_mask_bhtd)
+        for name, dy_value in make_dy_controls(dk_core, case, args, tail_mask_bhtd).items()
+    }
+
     comparisons = {
         "q_kernel_vs_py_norm": compare(dq_kernel_bthd, dq_py_norm_bthd, args),
         "k_kernel_vs_py_norm": compare(dk_kernel_bthd, dk_py_norm_bthd, args),
@@ -405,6 +472,7 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
             if tail_mask_bhtd is not None
             else [],
         },
+        "dy_control_reports": dy_control_reports,
         "passed": (
             comparisons["q_kernel_vs_py_norm"]["allclose"]
             and comparisons["k_kernel_vs_py_norm"]["allclose"]

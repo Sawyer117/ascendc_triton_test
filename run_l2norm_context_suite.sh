@@ -114,6 +114,15 @@ for path in sorted(out_dir.glob('*.json')):
     for key in ('q_kernel_vs_ref', 'k_kernel_vs_ref'):
         item = tails.get(key, {})
         fields.append(f"tail_{key} allclose={item.get('allclose')} max_abs={item.get('max_abs')} rms={item.get('rms')}")
+    controls = payload.get('dy_control_reports') or {}
+    for name in ('real', 'random_same_rms', 'shuffle_flat', 'shuffle_tokens', 'tail_only', 'tail_zero', 'random_tail_same_rms'):
+        report = controls.get(name) or {}
+        stats = report.get('stats') or {}
+        tail_stats = report.get('tail_stats') or {}
+        dy_stats = report.get('dy_stats') or {}
+        fields.append(
+            f"dy_{name} allclose={stats.get('allclose')} max_abs={stats.get('max_abs')} rms={stats.get('rms')} mismatch={stats.get('mismatch_ratio')} dy_rms={dy_stats.get('rms')} tail_allclose={tail_stats.get('allclose')} tail_max={tail_stats.get('max_abs')}"
+        )
     rows.append('\t'.join(fields))
 
 summary = out_dir / 'summary.txt'
