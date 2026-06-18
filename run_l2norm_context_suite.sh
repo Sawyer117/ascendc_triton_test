@@ -99,6 +99,10 @@ for path in sorted(out_dir.glob('*.json')):
     for key in (
         'q_kernel_vs_py_norm',
         'k_kernel_vs_py_norm',
+        'q_kernel_autograd_vs_py_norm',
+        'k_kernel_autograd_vs_py_norm',
+        'q_kernel_autograd_vs_direct',
+        'k_kernel_autograd_vs_direct',
         'k_kernel_dy_contig_vs_py_norm',
         'k_kernel_dy_clone_vs_py_norm',
         'k_kernel_all_clone_vs_py_norm',
@@ -111,7 +115,7 @@ for path in sorted(out_dir.glob('*.json')):
         fields.append(
             f"{key} allclose={item.get('allclose')} max_abs={item.get('max_abs')} rms={item.get('rms')} mismatch={item.get('mismatch_ratio')}"
         )
-    for key in ('q_kernel_vs_ref', 'k_kernel_vs_ref'):
+    for key in ('q_kernel_vs_ref', 'k_kernel_vs_ref', 'q_kernel_autograd_vs_py_norm', 'k_kernel_autograd_vs_py_norm', 'q_kernel_autograd_vs_direct', 'k_kernel_autograd_vs_direct'):
         item = tails.get(key, {})
         fields.append(f"tail_{key} allclose={item.get('allclose')} max_abs={item.get('max_abs')} rms={item.get('rms')}")
     controls = payload.get('dy_control_reports') or {}

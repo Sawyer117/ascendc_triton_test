@@ -237,6 +237,30 @@ def compare_kernel_on_dy(label, flash_module, x_norm, rstd, dy, args: argparse.N
     }
 
 
+def l2norm_bwd_inside_autograd_backward(flash_module, x_norm, rstd, dy):
+    """Call the real l2norm_bwd from inside a custom autograd backward."""
+    torch = cmp.torch
+
+    class L2NormBackwardProbe(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, rstd_in):
+            ctx.save_for_backward(x, rstd_in)
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad_out):
+            x, rstd_in = ctx.saved_tensors
+            return flash_module.l2norm_bwd(x, rstd_in, grad_out), None
+
+    x_leaf = x_norm.detach().clone().requires_grad_(True)
+    rstd_leaf = rstd.detach().clone()
+    dy_in = dy.detach().clone()
+    y = L2NormBackwardProbe.apply(x_leaf, rstd_leaf)
+    y.backward(dy_in)
+    torch.npu.synchronize()
+    return x_leaf.grad
+
+
 def expanded_mask(mask, tensor):
     torch = cmp.torch
     if mask is None:
@@ -382,6 +406,8 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
 
     dq_kernel_norm = flash_module.l2norm_bwd(q_norm, q_rstd, dq_core)
     dk_kernel_norm = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core)
+    dq_kernel_autograd = l2norm_bwd_inside_autograd_backward(flash_module, q_norm, q_rstd, dq_core)
+    dk_kernel_autograd = l2norm_bwd_inside_autograd_backward(flash_module, k_norm, k_rstd, dk_core)
     dk_kernel_dy_contig = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core.contiguous())
     dk_kernel_dy_clone = flash_module.l2norm_bwd(k_norm, k_rstd, dk_core.detach().clone())
     dk_kernel_all_clone = flash_module.l2norm_bwd(
@@ -397,6 +423,8 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
 
     dq_kernel_bthd = to_bthd_for_compare(cu, dq_kernel_norm)
     dk_kernel_bthd = to_bthd_for_compare(cu, dk_kernel_norm)
+    dq_kernel_autograd_bthd = to_bthd_for_compare(cu, dq_kernel_autograd)
+    dk_kernel_autograd_bthd = to_bthd_for_compare(cu, dk_kernel_autograd)
     dk_kernel_dy_contig_bthd = to_bthd_for_compare(cu, dk_kernel_dy_contig)
     dk_kernel_dy_clone_bthd = to_bthd_for_compare(cu, dk_kernel_dy_clone)
     dk_kernel_all_clone_bthd = to_bthd_for_compare(cu, dk_kernel_all_clone)
@@ -415,6 +443,10 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
     comparisons = {
         "q_kernel_vs_py_norm": compare(dq_kernel_bthd, dq_py_norm_bthd, args),
         "k_kernel_vs_py_norm": compare(dk_kernel_bthd, dk_py_norm_bthd, args),
+        "q_kernel_autograd_vs_py_norm": compare(dq_kernel_autograd_bthd, dq_py_norm_bthd, args),
+        "k_kernel_autograd_vs_py_norm": compare(dk_kernel_autograd_bthd, dk_py_norm_bthd, args),
+        "q_kernel_autograd_vs_direct": compare(dq_kernel_autograd_bthd, dq_kernel_bthd, args),
+        "k_kernel_autograd_vs_direct": compare(dk_kernel_autograd_bthd, dk_kernel_bthd, args),
         "k_kernel_dy_contig_vs_py_norm": compare(dk_kernel_dy_contig_bthd, dk_py_norm_bthd, args),
         "k_kernel_dy_clone_vs_py_norm": compare(dk_kernel_dy_clone_bthd, dk_py_norm_bthd, args),
         "k_kernel_all_clone_vs_py_norm": compare(dk_kernel_all_clone_bthd, dk_py_norm_bthd, args),
@@ -435,6 +467,10 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
             ("k_kernel_all_clone_vs_py_norm", dk_kernel_all_clone_bthd, dk_py_norm_bthd),
             ("q_kernel_vs_ref", dq_kernel_bthd, reference["grad_q"]),
             ("k_kernel_vs_ref", dk_kernel_bthd, reference["grad_k"]),
+            ("q_kernel_autograd_vs_py_norm", dq_kernel_autograd_bthd, dq_py_norm_bthd),
+            ("k_kernel_autograd_vs_py_norm", dk_kernel_autograd_bthd, dk_py_norm_bthd),
+            ("q_kernel_autograd_vs_direct", dq_kernel_autograd_bthd, dq_kernel_bthd),
+            ("k_kernel_autograd_vs_direct", dk_kernel_autograd_bthd, dk_kernel_bthd),
             ("q_py_norm_vs_ref", dq_py_norm_bthd, reference["grad_q"]),
             ("k_py_norm_vs_ref", dk_py_norm_bthd, reference["grad_k"]),
         ):
@@ -468,8 +504,16 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
             "k_kernel_vs_py_norm": topk_error_details(
                 dk_kernel_norm, dk_py_norm, k_norm, k_rstd, dk_core, case, args
             ),
+            "k_kernel_autograd_vs_py_norm": topk_error_details(
+                dk_kernel_autograd, dk_py_norm, k_norm, k_rstd, dk_core, case, args
+            ),
             "tail_k_kernel_vs_py_norm": topk_error_details(
                 dk_kernel_norm, dk_py_norm, k_norm, k_rstd, dk_core, case, args, tail_mask_bhtd
+            )
+            if tail_mask_bhtd is not None
+            else [],
+            "tail_k_kernel_autograd_vs_py_norm": topk_error_details(
+                dk_kernel_autograd, dk_py_norm, k_norm, k_rstd, dk_core, case, args, tail_mask_bhtd
             )
             if tail_mask_bhtd is not None
             else [],
@@ -478,6 +522,8 @@ def run_case(case: cmp.Case, args: argparse.Namespace, flash_module) -> dict[str
         "passed": (
             comparisons["q_kernel_vs_py_norm"]["allclose"]
             and comparisons["k_kernel_vs_py_norm"]["allclose"]
+            and comparisons["q_kernel_autograd_vs_py_norm"]["allclose"]
+            and comparisons["k_kernel_autograd_vs_py_norm"]["allclose"]
             and comparisons["q_kernel_vs_ref"]["allclose"]
             and comparisons["k_kernel_vs_ref"]["allclose"]
         ),

@@ -110,7 +110,7 @@ case "${MODE}" in
 esac
 
 SUMMARY_VARIANTS=${VARIANT_LIST:-${VARIANT}}
-"${PYTHON}" - "${OUT_DIR}" "${SUMMARY_VARIANTS}" "${MODE}" <<'PY'
+"${PYTHON}" - "${OUT_DIR}" "${SUMMARY_VARIANTS}" "${MODE}" <<'PY' | tee "${OUT_DIR}/summary.txt"
 import json
 import pathlib
 import sys
