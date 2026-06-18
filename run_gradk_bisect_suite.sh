@@ -96,7 +96,7 @@ case "${MODE}" in
     if [[ -n "${VARIANT_LIST}" ]]; then
       read -r -a variants <<<"${VARIANT_LIST}"
     else
-      variants=(ascendc ascendc_saved_x ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
+      variants=(ascendc ascendc_saved_x ascendc_kernel_l2norm_norm ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
     fi
     for variant in "${variants[@]}"; do
       run_case_with_variant "target_single_1121__${variant}" "${variant}" \
