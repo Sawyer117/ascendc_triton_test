@@ -38,6 +38,8 @@ import compare_gdn_precision as cmp
 VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
     "ascendc": (False, False, False, False),
     "ascendc_saved_x": (False, False, False, False),
+    "ascendc_py_l2norm_norm": (False, False, False, False),
+    "ascendc_py_l2norm_orig": (False, False, False, False),
     "manual_ascendc": (False, False, False, False),
     "triton_full": (False, False, False, False),
     "triton_dqkwg": (False, False, True, False),
@@ -510,8 +512,26 @@ def run_wrapper_ascendc_variant(case: cmp.Case, args: argparse.Namespace, flash_
     }
 
 
-def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
-    """Run the real AscendC wrapper path with original q/k saved for l2norm_bwd."""
+def py_l2norm_bwd_normalized(y, rstd, dy):
+    dot = (dy * y).sum(dim=-1, keepdim=True)
+    return ((dy - y * dot) * rstd).to(y.dtype)
+
+
+def py_l2norm_bwd_original(x, rstd, dy):
+    y = (x * rstd).to(x.dtype)
+    dot = (dy * y).sum(dim=-1, keepdim=True)
+    return ((dy - y * dot) * rstd).to(x.dtype)
+
+
+def run_wrapper_l2norm_bwd_variant(
+    case: cmp.Case,
+    args: argparse.Namespace,
+    flash_module,
+    inputs: tuple[Any, ...],
+    do,
+    l2norm_bwd_mode: str,
+):
+    """Run the real AscendC wrapper path with a selected final l2norm backward."""
     torch = cmp.torch
     q, k, v, beta, g, cu = inputs
     q_ac, k_ac, v_ac = [cmp.clone_leaf(x.transpose(1, 2).contiguous()) for x in (q, k, v)]
@@ -594,8 +614,17 @@ def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace
                 chunk_size=ctx.chunk_size,
             )
             if ctx.use_l2norm:
-                dq = flash_module.l2norm_bwd(q_orig, q_rstd, dq)
-                dk = flash_module.l2norm_bwd(k_orig, k_rstd, dk)
+                if l2norm_bwd_mode == "kernel_original":
+                    dq = flash_module.l2norm_bwd(q_orig, q_rstd, dq)
+                    dk = flash_module.l2norm_bwd(k_orig, k_rstd, dk)
+                elif l2norm_bwd_mode == "py_normalized":
+                    dq = py_l2norm_bwd_normalized(q_work, q_rstd, dq)
+                    dk = py_l2norm_bwd_normalized(k_work, k_rstd, dk)
+                elif l2norm_bwd_mode == "py_original":
+                    dq = py_l2norm_bwd_original(q_orig, q_rstd, dq)
+                    dk = py_l2norm_bwd_original(k_orig, k_rstd, dk)
+                else:
+                    raise RuntimeError(f"unknown l2norm_bwd_mode={l2norm_bwd_mode!r}")
             return (
                 dq.to(q_orig),
                 dk.to(k_orig),
@@ -644,6 +673,18 @@ def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace
         "grad_g": g_ac.grad,
         "components": {},
     }
+
+
+def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "kernel_original")
+
+
+def run_wrapper_ascendc_py_l2norm_norm_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "py_normalized")
+
+
+def run_wrapper_ascendc_py_l2norm_orig_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "py_original")
 
 
 def run_variant(
@@ -995,8 +1036,12 @@ def infer_culprit(variant_results: dict[str, Any]) -> str:
             "metadata conversion, layout, and l2norm handling."
         )
 
+    if grad_k_allclose(variant_results, "ascendc_py_l2norm_norm"):
+        return "Replacing only final l2norm_bwd with PyTorch formula using normalized q/k fixes grad_k; culprit is the l2norm_bwd kernel/implementation, normalized-input contract."
+    if grad_k_allclose(variant_results, "ascendc_py_l2norm_orig"):
+        return "Replacing only final l2norm_bwd with PyTorch formula using original q/k fixes grad_k; culprit is the l2norm_bwd kernel/implementation, original-input contract."
     if grad_k_allclose(variant_results, "ascendc_saved_x"):
-        return "Saving original q/k for l2norm_bwd fixes grad_k; culprit is q/k l2norm backward saved-input contract, not a GDN sub-operator."
+        return "Saving original q/k for existing l2norm_bwd fixes grad_k; culprit is q/k l2norm backward saved-input contract, not a GDN sub-operator."
 
     full_triton_ok = grad_k_allclose(variant_results, "triton_full")
     if full_triton_ok:
@@ -1091,6 +1136,10 @@ def main() -> int:
                     raw = run_wrapper_ascendc_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_saved_x":
                     raw = run_wrapper_ascendc_saved_x_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_py_l2norm_norm":
+                    raw = run_wrapper_ascendc_py_l2norm_norm_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_py_l2norm_orig":
+                    raw = run_wrapper_ascendc_py_l2norm_orig_variant(case, args, flash_module, inputs, do)
                 elif name == "triton_full":
                     raw = run_full_triton_variant(case, args, full_triton_gdn, inputs, do)
                 else:

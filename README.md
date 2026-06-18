@@ -377,10 +377,10 @@ Keep the default `normalized` mode for FLA-npu wrapper parity unless you are exp
 If the core `dk` components pass but wrapper `grad_k` still fails, validate the q/k l2norm saved-input contract directly in the real wrapper path:
 
 ```bash
-MODE=target_isolated VARIANT_LIST="ascendc ascendc_saved_x triton_full" bash run_gradk_bisect_suite.sh
+MODE=target_isolated VARIANT_LIST="ascendc ascendc_saved_x ascendc_py_l2norm_norm ascendc_py_l2norm_orig triton_full" bash run_gradk_bisect_suite.sh
 ```
 
-`ascendc_saved_x` does not replace any GDN sub-operator. It only saves original q/k before `l2norm_fwd` and passes those originals to `l2norm_bwd`. If `ascendc` fails and `ascendc_saved_x` passes, the culprit is the q/k l2norm backward saved-input contract.
+`ascendc_saved_x`, `ascendc_py_l2norm_norm`, and `ascendc_py_l2norm_orig` do not replace any GDN sub-operator. They only change the final q/k l2norm backward step. If a PyTorch l2norm variant passes while `ascendc` fails, the culprit is the l2norm backward implementation/contract, not `dv_local`, `dhu`, `dqkwg`, or WY.
 
 If `manual_ascendc` is NaN or all hybrid replacements still fail while `triton_full` passes, stop using replacement validity as a culprit signal and compare intermediate ops directly:
 
