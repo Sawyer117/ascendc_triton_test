@@ -512,12 +512,20 @@ def run_wrapper_ascendc_variant(case: cmp.Case, args: argparse.Namespace, flash_
     }
 
 
+def _broadcast_rstd(rstd, target):
+    if rstd.ndim == target.ndim - 1:
+        return rstd.unsqueeze(-1)
+    return rstd
+
+
 def py_l2norm_bwd_normalized(y, rstd, dy):
+    rstd = _broadcast_rstd(rstd, dy)
     dot = (dy * y).sum(dim=-1, keepdim=True)
     return ((dy - y * dot) * rstd).to(y.dtype)
 
 
 def py_l2norm_bwd_original(x, rstd, dy):
+    rstd = _broadcast_rstd(rstd, dy)
     y = (x * rstd).to(x.dtype)
     dot = (dy * y).sum(dim=-1, keepdim=True)
     return ((dy - y * dot) * rstd).to(x.dtype)
