@@ -40,6 +40,9 @@ VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
     "ascendc_trace_l2norm": (False, False, False, False),
     "ascendc_saved_x": (False, False, False, False),
     "ascendc_kernel_l2norm_norm": (False, False, False, False),
+    "ascendc_kernel_l2norm_norm_sync": (False, False, False, False),
+    "ascendc_kernel_l2norm_norm_clone_dy": (False, False, False, False),
+    "ascendc_kernel_l2norm_norm_all_clone": (False, False, False, False),
     "ascendc_py_l2norm_norm": (False, False, False, False),
     "ascendc_py_l2norm_orig": (False, False, False, False),
     "manual_ascendc": (False, False, False, False),
@@ -647,6 +650,7 @@ def run_wrapper_l2norm_bwd_variant(
     inputs: tuple[Any, ...],
     do,
     l2norm_bwd_mode: str,
+    boundary_mode: str = "none",
 ):
     """Run the real AscendC wrapper path with a selected final l2norm backward."""
     torch = cmp.torch
@@ -730,16 +734,34 @@ def run_wrapper_l2norm_bwd_variant(
                 chunk_indices_list=ctx.chunk_indices_list,
                 chunk_size=ctx.chunk_size,
             )
+            q_l2_arg = q_work
+            k_l2_arg = k_work
+            q_l2_rstd = q_rstd
+            k_l2_rstd = k_rstd
+            if boundary_mode == "sync":
+                torch.npu.synchronize()
+            elif boundary_mode == "clone_dy":
+                dq = dq.detach().clone().contiguous()
+                dk = dk.detach().clone().contiguous()
+            elif boundary_mode == "all_clone":
+                q_l2_arg = q_work.detach().clone().contiguous()
+                k_l2_arg = k_work.detach().clone().contiguous()
+                q_l2_rstd = q_rstd.detach().clone().contiguous()
+                k_l2_rstd = k_rstd.detach().clone().contiguous()
+                dq = dq.detach().clone().contiguous()
+                dk = dk.detach().clone().contiguous()
+            elif boundary_mode != "none":
+                raise RuntimeError(f"unknown boundary_mode={boundary_mode!r}")
             if ctx.use_l2norm:
                 if l2norm_bwd_mode == "kernel_original":
                     dq = flash_module.l2norm_bwd(q_orig, q_rstd, dq)
                     dk = flash_module.l2norm_bwd(k_orig, k_rstd, dk)
                 elif l2norm_bwd_mode == "kernel_normalized":
-                    dq = flash_module.l2norm_bwd(q_work, q_rstd, dq)
-                    dk = flash_module.l2norm_bwd(k_work, k_rstd, dk)
+                    dq = flash_module.l2norm_bwd(q_l2_arg, q_l2_rstd, dq)
+                    dk = flash_module.l2norm_bwd(k_l2_arg, k_l2_rstd, dk)
                 elif l2norm_bwd_mode == "py_normalized":
-                    dq = py_l2norm_bwd_normalized(q_work, q_rstd, dq)
-                    dk = py_l2norm_bwd_normalized(k_work, k_rstd, dk)
+                    dq = py_l2norm_bwd_normalized(q_l2_arg, q_l2_rstd, dq)
+                    dk = py_l2norm_bwd_normalized(k_l2_arg, k_l2_rstd, dk)
                 elif l2norm_bwd_mode == "py_original":
                     dq = py_l2norm_bwd_original(q_orig, q_rstd, dq)
                     dk = py_l2norm_bwd_original(k_orig, k_rstd, dk)
@@ -801,6 +823,18 @@ def run_wrapper_ascendc_saved_x_variant(case: cmp.Case, args: argparse.Namespace
 
 def run_wrapper_ascendc_kernel_l2norm_norm_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
     return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "kernel_normalized")
+
+
+def run_wrapper_ascendc_kernel_l2norm_norm_sync_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "kernel_normalized", "sync")
+
+
+def run_wrapper_ascendc_kernel_l2norm_norm_clone_dy_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "kernel_normalized", "clone_dy")
+
+
+def run_wrapper_ascendc_kernel_l2norm_norm_all_clone_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    return run_wrapper_l2norm_bwd_variant(case, args, flash_module, inputs, do, "kernel_normalized", "all_clone")
 
 
 def run_wrapper_ascendc_py_l2norm_norm_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
@@ -1266,6 +1300,12 @@ def main() -> int:
                     raw = run_wrapper_ascendc_saved_x_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_kernel_l2norm_norm":
                     raw = run_wrapper_ascendc_kernel_l2norm_norm_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_kernel_l2norm_norm_sync":
+                    raw = run_wrapper_ascendc_kernel_l2norm_norm_sync_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_kernel_l2norm_norm_clone_dy":
+                    raw = run_wrapper_ascendc_kernel_l2norm_norm_clone_dy_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_kernel_l2norm_norm_all_clone":
+                    raw = run_wrapper_ascendc_kernel_l2norm_norm_all_clone_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_py_l2norm_norm":
                     raw = run_wrapper_ascendc_py_l2norm_norm_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_py_l2norm_orig":

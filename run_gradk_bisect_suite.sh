@@ -96,7 +96,7 @@ case "${MODE}" in
     if [[ -n "${VARIANT_LIST}" ]]; then
       read -r -a variants <<<"${VARIANT_LIST}"
     else
-      variants=(ascendc ascendc_trace_l2norm ascendc_saved_x ascendc_kernel_l2norm_norm ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
+      variants=(ascendc ascendc_trace_l2norm ascendc_saved_x ascendc_kernel_l2norm_norm ascendc_kernel_l2norm_norm_sync ascendc_kernel_l2norm_norm_clone_dy ascendc_kernel_l2norm_norm_all_clone ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
     fi
     for variant in "${variants[@]}"; do
       run_case_with_variant "target_single_1121__${variant}" "${variant}" \
@@ -131,7 +131,7 @@ elif mode == "target_isolated":
     isolated_variants = (
         variant_env.split()
         if variant_env != "all"
-        else ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
+        else ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_kernel_l2norm_norm_sync", "ascendc_kernel_l2norm_norm_clone_dy", "ascendc_kernel_l2norm_norm_all_clone", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
     )
     for variant in isolated_variants:
         case_files[f"target_single_1121__{variant}"] = out_dir / f"target_single_1121__{variant}.json"
@@ -147,7 +147,7 @@ for name, path in case_files.items():
 if mode == "target_isolated":
     variants = ["__from_file__"]
 elif variant_env == "all":
-    variants = ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
+    variants = ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_kernel_l2norm_norm_sync", "ascendc_kernel_l2norm_norm_clone_dy", "ascendc_kernel_l2norm_norm_all_clone", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
 else:
     variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]
