@@ -37,6 +37,7 @@ import compare_gdn_precision as cmp
 # Tuple layout: replace_dv_local, replace_dhu, replace_dqkwg, replace_wy.
 VARIANTS: dict[str, tuple[bool, bool, bool, bool]] = {
     "ascendc": (False, False, False, False),
+    "ascendc_trace_l2norm": (False, False, False, False),
     "ascendc_saved_x": (False, False, False, False),
     "ascendc_kernel_l2norm_norm": (False, False, False, False),
     "ascendc_py_l2norm_norm": (False, False, False, False),
@@ -530,6 +531,113 @@ def py_l2norm_bwd_original(x, rstd, dy):
     y = (x * rstd).to(x.dtype)
     dot = (dy * y).sum(dim=-1, keepdim=True)
     return ((dy - y * dot) * rstd).to(x.dtype)
+
+
+def tensor_meta(tensor):
+    return {
+        "shape": list(tensor.shape),
+        "stride": list(tensor.stride()),
+        "is_contiguous": bool(tensor.is_contiguous()),
+        "dtype": str(tensor.dtype),
+        "storage_offset": int(tensor.storage_offset()),
+    }
+
+
+def tensor_value_stats(tensor):
+    t = tensor.detach().float()
+    return {
+        "finite": bool(t.isfinite().all().item()),
+        "min": float(t.min().item()),
+        "max": float(t.max().item()),
+        "mean": float(t.mean().item()),
+        "rms": float((t * t).mean().sqrt().item()),
+        "zero_ratio": float((t == 0).float().mean().item()),
+    }
+
+
+def maybe_stats(actual, expected, args: argparse.Namespace):
+    try:
+        return cmp.tensor_stats(actual, expected, args.atol, args.rtol)
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"error": compact_error(exc)}
+
+
+def summarize_l2norm_trace(records: dict[str, list[dict[str, Any]]], args: argparse.Namespace):
+    fwd = records["fwd"]
+    out = {"num_fwd_calls": len(fwd), "num_bwd_calls": len(records["bwd"]), "calls": []}
+    for i, rec in enumerate(records["bwd"]):
+        fwd_rec = fwd[i] if i < len(fwd) else None
+        call = {
+            "index": i,
+            "side_guess": "q" if i == 0 else ("k" if i == 1 else f"extra_{i}"),
+            "x_meta": tensor_meta(rec["x"]),
+            "rstd_meta": tensor_meta(rec["rstd"]),
+            "dy_meta": tensor_meta(rec["dy"]),
+            "out_meta": tensor_meta(rec["out"]),
+            "x_stats": tensor_value_stats(rec["x"]),
+            "rstd_stats": tensor_value_stats(rec["rstd"]),
+            "dy_stats": tensor_value_stats(rec["dy"]),
+            "out_stats": tensor_value_stats(rec["out"]),
+            "out_vs_py_using_x_as_normalized": maybe_stats(
+                rec["out"], py_l2norm_bwd_normalized(rec["x"], rec["rstd"], rec["dy"]), args
+            ),
+            "out_vs_py_using_x_as_original": maybe_stats(
+                rec["out"], py_l2norm_bwd_original(rec["x"], rec["rstd"], rec["dy"]), args
+            ),
+        }
+        if fwd_rec is not None:
+            call.update(
+                {
+                    "fwd_input_meta": tensor_meta(fwd_rec["x"]),
+                    "fwd_output_meta": tensor_meta(fwd_rec["y"]),
+                    "fwd_rstd_meta": tensor_meta(fwd_rec["rstd"]),
+                    "x_vs_fwd_input_original": maybe_stats(rec["x"], fwd_rec["x"], args),
+                    "x_vs_fwd_output_normalized": maybe_stats(rec["x"], fwd_rec["y"], args),
+                    "rstd_vs_fwd_rstd": maybe_stats(rec["rstd"], fwd_rec["rstd"], args),
+                    "out_vs_py_fwd_normalized": maybe_stats(
+                        rec["out"], py_l2norm_bwd_normalized(fwd_rec["y"], rec["rstd"], rec["dy"]), args
+                    ),
+                    "out_vs_py_fwd_original": maybe_stats(
+                        rec["out"], py_l2norm_bwd_original(fwd_rec["x"], rec["rstd"], rec["dy"]), args
+                    ),
+                }
+            )
+        out["calls"].append(call)
+    return out
+
+
+def run_wrapper_ascendc_trace_l2norm_variant(case: cmp.Case, args: argparse.Namespace, flash_module, inputs: tuple[Any, ...], do):
+    """Run original wrapper unchanged, but record actual l2norm_fwd/bwd call arguments."""
+    original_fwd = flash_module.l2norm_fwd
+    original_bwd = flash_module.l2norm_bwd
+    records: dict[str, list[dict[str, Any]]] = {"fwd": [], "bwd": []}
+
+    def traced_fwd(x):
+        y, rstd = original_fwd(x)
+        records["fwd"].append({"x": x.detach().clone(), "y": y.detach().clone(), "rstd": rstd.detach().clone()})
+        return y, rstd
+
+    def traced_bwd(x, rstd, dy):
+        out = original_bwd(x, rstd, dy)
+        records["bwd"].append(
+            {
+                "x": x.detach().clone(),
+                "rstd": rstd.detach().clone(),
+                "dy": dy.detach().clone(),
+                "out": out.detach().clone(),
+            }
+        )
+        return out
+
+    flash_module.l2norm_fwd = traced_fwd
+    flash_module.l2norm_bwd = traced_bwd
+    try:
+        raw = run_wrapper_ascendc_variant(case, args, flash_module, inputs, do)
+    finally:
+        flash_module.l2norm_fwd = original_fwd
+        flash_module.l2norm_bwd = original_bwd
+    raw["l2norm_trace"] = summarize_l2norm_trace(records, args)
+    return raw
 
 
 def run_wrapper_l2norm_bwd_variant(
@@ -1152,6 +1260,8 @@ def main() -> int:
             try:
                 if name == "ascendc":
                     raw = run_wrapper_ascendc_variant(case, args, flash_module, inputs, do)
+                elif name == "ascendc_trace_l2norm":
+                    raw = run_wrapper_ascendc_trace_l2norm_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_saved_x":
                     raw = run_wrapper_ascendc_saved_x_variant(case, args, flash_module, inputs, do)
                 elif name == "ascendc_kernel_l2norm_norm":
@@ -1204,6 +1314,8 @@ def main() -> int:
                 "comparisons": comparisons,
                 "tail_reports": tails,
             }
+            if "l2norm_trace" in raw:
+                variant_results[name]["l2norm_trace"] = raw["l2norm_trace"]
             grad_k = comparisons["grad_k"]
             print(
                 "    grad_k",
@@ -1214,6 +1326,22 @@ def main() -> int:
                 flush=True,
             )
             print_tail_summary(name, tails)
+            if "l2norm_trace" in raw:
+                trace = raw["l2norm_trace"]
+                print(f"    l2norm_trace fwd={trace['num_fwd_calls']} bwd={trace['num_bwd_calls']}", flush=True)
+                for call in trace["calls"]:
+                    x_norm = call.get("x_vs_fwd_output_normalized", {})
+                    x_orig = call.get("x_vs_fwd_input_original", {})
+                    out_norm = call.get("out_vs_py_fwd_normalized", {})
+                    print(
+                        "    l2norm_call",
+                        call["side_guess"],
+                        f"x_vs_norm={x_norm.get('allclose', x_norm.get('error', '?'))}",
+                        f"x_vs_orig={x_orig.get('allclose', x_orig.get('error', '?'))}",
+                        f"out_vs_py_norm={out_norm.get('allclose', out_norm.get('error', '?'))}",
+                        f"dy_rms={call['dy_stats']['rms']:.6g}",
+                        flush=True,
+                    )
 
         if "ascendc" in variant_results:
             print_tail_top_errors("ascendc", variant_results["ascendc"].get("tail_reports", {}))

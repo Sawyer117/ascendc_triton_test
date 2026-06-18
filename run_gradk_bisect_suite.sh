@@ -96,7 +96,7 @@ case "${MODE}" in
     if [[ -n "${VARIANT_LIST}" ]]; then
       read -r -a variants <<<"${VARIANT_LIST}"
     else
-      variants=(ascendc ascendc_saved_x ascendc_kernel_l2norm_norm ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
+      variants=(ascendc ascendc_trace_l2norm ascendc_saved_x ascendc_kernel_l2norm_norm ascendc_py_l2norm_norm ascendc_py_l2norm_orig manual_ascendc triton_full triton_dqkwg triton_wy triton_both triton_dvlocal)
     fi
     for variant in "${variants[@]}"; do
       run_case_with_variant "target_single_1121__${variant}" "${variant}" \
@@ -131,7 +131,7 @@ elif mode == "target_isolated":
     isolated_variants = (
         variant_env.split()
         if variant_env != "all"
-        else ["ascendc", "ascendc_saved_x", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
+        else ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
     )
     for variant in isolated_variants:
         case_files[f"target_single_1121__{variant}"] = out_dir / f"target_single_1121__{variant}.json"
@@ -147,7 +147,7 @@ for name, path in case_files.items():
 if mode == "target_isolated":
     variants = ["__from_file__"]
 elif variant_env == "all":
-    variants = ["ascendc", "ascendc_saved_x", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
+    variants = ["ascendc", "ascendc_trace_l2norm", "ascendc_saved_x", "ascendc_kernel_l2norm_norm", "ascendc_py_l2norm_norm", "ascendc_py_l2norm_orig", "manual_ascendc", "triton_full", "triton_dqkwg", "triton_wy", "triton_both", "triton_dvlocal"]
 else:
     variants = [variant_env]
 controls = ["fixed_1k_h8", "varlen_single_1024", "varlen_aligned_1024"]
@@ -198,6 +198,25 @@ for case_name in case_files:
             f"{str(tail['allclose']) if tail else '-':8s} "
             f"{tail['max_abs'] if tail else 0:10.6g} -"
         )
+        trace = result.get("l2norm_trace")
+        if trace:
+            print(f"{display_case:22s} {variant:14s} l2norm_trace fwd={trace.get('num_fwd_calls')} bwd={trace.get('num_bwd_calls')}")
+            for call in trace.get("calls", []):
+                x_norm = call.get("x_vs_fwd_output_normalized", {})
+                x_orig = call.get("x_vs_fwd_input_original", {})
+                rstd = call.get("rstd_vs_fwd_rstd", {})
+                out_norm = call.get("out_vs_py_fwd_normalized", {})
+                out_x_norm = call.get("out_vs_py_using_x_as_normalized", {})
+                print(
+                    f"{display_case:22s} {variant:14s} "
+                    f"l2norm_call={call.get('side_guess')} "
+                    f"x_vs_norm={x_norm.get('allclose', x_norm.get('error', '?'))} "
+                    f"x_vs_orig={x_orig.get('allclose', x_orig.get('error', '?'))} "
+                    f"rstd_match={rstd.get('allclose', rstd.get('error', '?'))} "
+                    f"out_vs_py_fwd_norm={out_norm.get('allclose', out_norm.get('error', '?'))} "
+                    f"out_vs_py_x_norm={out_x_norm.get('allclose', out_x_norm.get('error', '?'))} "
+                    f"dy_rms={call.get('dy_stats', {}).get('rms')}"
+                )
 
 print()
 print("diagnostic gate")
