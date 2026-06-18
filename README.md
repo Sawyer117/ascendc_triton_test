@@ -129,6 +129,25 @@ Read `./precision_results/l2norm_kernel/summary.txt`:
 
 If both `py_*` rows pass but a `kernel_*` row fails, the error is isolated to the real l2norm backward kernel/contract for that layout and shape.
 
+## GDN-Context L2Norm Suite
+
+Use this after the standalone l2norm suite passes, because random standalone inputs do not necessarily reproduce the GDN failure. This suite runs the real FLA-NPU GDN forward/backward core to obtain the actual upstream `dq_core/dk_core`, then compares the final real l2norm kernel call with the PyTorch formula on the same tensors.
+
+```bash
+bash run_l2norm_context_suite.sh
+cat ./precision_results/l2norm_context/summary.txt
+```
+
+Read the summary:
+
+- `q_kernel_vs_py_norm`: real q-side `l2norm_bwd(normalized_q, q_rstd, dq_core)` vs PyTorch formula.
+- `k_kernel_vs_py_norm`: real k-side `l2norm_bwd(normalized_k, k_rstd, dk_core)` vs PyTorch formula.
+- `q_kernel_vs_ref` / `k_kernel_vs_ref`: final q/k gradients from real l2norm kernel vs full PyTorch GDN reference.
+- `q_py_norm_vs_ref` / `k_py_norm_vs_ref`: final q/k gradients from PyTorch l2norm formula vs full PyTorch GDN reference.
+
+For the target `cu_seqlens=0,1121` failure, the observed result is: q-side passes, k-side kernel fails, and k-side PyTorch formula passes on the same `dk_core`. This localizes the issue to k-side real `l2norm_bwd` in the GDN backward context.
+
+
 ## Expected Environment
 
 Run on the Ascend server with the same Python environment that has working `torch`, `torch_npu`, and `fla_npu`.
