@@ -57,6 +57,23 @@ Current evidence rules out these components as the primary source of the target 
 
 The trace script had known layout limitations for state tensors such as `fwd.h` and `bwd.dhu.dh`, so those shape-mismatch rows should not be used as the final diagnosis. The replacement test is the stronger evidence.
 
+## Single-Operator L2Norm Check
+
+A dedicated real-kernel isolation suite has been added for the final validation step:
+
+```bash
+bash run_l2norm_kernel_suite.sh
+```
+
+This suite calls `l2norm_fwd/l2norm_bwd` directly from `flash-linear-attention-npu/examples/flash_gated_delta_rule.py` and compares both possible backward contracts against PyTorch autograd:
+
+- `l2norm_bwd(normalized_y, rstd, dy)`
+- `l2norm_bwd(original_x, rstd, dy)`
+
+It covers fixed 1024, fixed 1121, aligned packed varlen, single-segment 1121 varlen, and multi-segment unaligned varlen cases. The default layout is `BHTD`, matching the FLA-NPU flash wrapper's internal q/k layout. Use `LAYOUTS="BHTD BTHD" bash run_l2norm_kernel_suite.sh` to additionally test the user-facing `BTHD` layout.
+
+The replacement test above identifies the final l2norm backward path as the only step that must be changed to recover `grad_k`. The single-operator suite is the direct proof of whether the real `l2norm_bwd` kernel itself diverges from PyTorch for specific shape/layout/tail cases.
+
 ## Creative/OpenI Status
 
 The creative-side issue was a wrapper contract mismatch around fused q/k l2norm backward. In `creative_snapshot`, after aligning the saved/input contract, the following suite passed:

@@ -97,6 +97,38 @@ Read `./l2norm_mode_results/summary.txt`:
 
 This suite therefore distinguishes a wrapper/contract mismatch from a shape-specific l2norm math issue without depending on external `mindspeed` imports.
 
+## Real L2Norm Kernel Suite
+
+Use this as the final single-operator isolation test for the real FLA-NPU `l2norm_fwd/l2norm_bwd` implementation. Unlike `compare_l2norm_precision.py`, this imports `l2norm_fwd` and `l2norm_bwd` from `flash-linear-attention-npu/examples/flash_gated_delta_rule.py` and calls the real kernel path directly.
+
+```bash
+bash run_l2norm_kernel_suite.sh
+```
+
+Default coverage:
+
+- `fixed_1k_h8`
+- `fixed_1121_h8`
+- `varlen_single_1024`
+- `varlen_aligned_1024`
+- `varlen_single_1121`
+- `varlen_unaligned_1121`
+
+By default the suite uses `LAYOUTS=BHTD`, matching the FLA-NPU flash wrapper's internal q/k layout. To also rule out layout sensitivity:
+
+```bash
+LAYOUTS="BHTD BTHD" bash run_l2norm_kernel_suite.sh
+```
+
+Read `./precision_results/l2norm_kernel/summary.txt`:
+
+- `kernel_norm` compares `l2norm_bwd(normalized_y, rstd, dy)` against PyTorch autograd.
+- `kernel_orig` compares `l2norm_bwd(original_x, rstd, dy)` against PyTorch autograd.
+- `py_norm` and `py_orig` are formula controls and should pass.
+- `tail_norm` and `tail_orig` report the same comparison restricted to segment tail tokens when a case has a non-64-aligned tail.
+
+If both `py_*` rows pass but a `kernel_*` row fails, the error is isolated to the real l2norm backward kernel/contract for that layout and shape.
+
 ## Expected Environment
 
 Run on the Ascend server with the same Python environment that has working `torch`, `torch_npu`, and `fla_npu`.
